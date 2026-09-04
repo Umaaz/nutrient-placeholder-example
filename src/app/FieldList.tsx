@@ -1,16 +1,21 @@
 // The author-facing field list — case ask 01 · property 2, "listing them lets us show the
 // author a field list that stays in step with the document".
 //
+// The `N×` in each row is the field's OCCURRENCE count: one key bound to several positions is
+// one field the author fills once, rendered everywhere it appears. Only the first placeable
+// occurrence gets a band here, because `findTokenRects` returns on its first hit — a real
+// anchor array would carry all of them.
+//
 // "In step with the document" is the part that costs. There is no event saying a placeholder
 // changed, so this list is rebuilt by re-scanning the whole document after every edit, and a
 // row's geometry is re-derived from the layout tree each time it is painted. A row showing
 // "no geometry" is a field the model found and the layout walkers could not place — usually a
 // field inside a table, which the walkers do not descend into.
 import type { BandGroup } from "@/internal/bandPainter";
-import type { ScannedField } from "@/internal/scanMarkers";
+import type { Placeholder } from "@/proposed/placeholders";
 
 type Props = {
-  fields: readonly ScannedField[];
+  fields: readonly Placeholder[];
   /** Keyed by field key — absent means the layout walkers could not place it. */
   groups: ReadonlyMap<string, BandGroup>;
   selectedKey: string | null;

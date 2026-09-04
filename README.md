@@ -13,6 +13,12 @@ It does one thing, in two lanes side by side:
   internals, it is built and it delegates to the left lane. Where it cannot be built at all,
   it says so.
 
+The app itself is written against the right-hand lane: every action in
+[`src/app/App.tsx`](src/app/App.tsx) is a call on that namespace, and the namespace delegates
+to [`src/internal/`](src/internal) rather than faking its answers. So the two columns are the
+same code path seen from both ends, and the reach counters are what the top half costs the
+bottom.
+
 The point is not that the feature is impossible. It ships. The point is what it costs, and
 which parts of it cannot be made correct at any price.
 
@@ -33,6 +39,7 @@ copy `.env.example` to `.env` if you want to supply one.
 | Press **Scan** — nine bands appear | Enumerating placeholders means walking every block and regexing its text | 01 · 2 |
 | The bands themselves | A highlight is our own `<div>` inside the SDK's page element, positioned from per-glyph advances | 01 · 4, 02 · A |
 | **Drag across a phrase** → name it → Mint | A selection re-derived from raw pointer coordinates, then a range recovered by counting `searchText` matches | 01 · 2, 02 · A, 02 · B |
+| Drag across a phrase that **repeats** — e.g. `the Receiving Party` | The card offers *just this one* / *all 6* / *pick…*, and the picker lets you choose the 1st and the 3rd | 01 · 2, 02 · B |
 | Hover a field row | Bands recede and emphasise — all inline styles, because the page shadow roots are closed | 01 · 4 |
 | Click a field row | Scroll-to-field, via a scroll container located by a CSS heuristic | 02 · D |
 | Type in the document | Every placeholder is re-scanned and re-placed from scratch, because the change event carries nothing | 02 · C |
@@ -55,6 +62,7 @@ two cannot be reached at all.
 | --- | --- | --- |
 | **1. The user cannot partially edit it** | **Unreachable** | `DocAuthEditorMode` is document-wide. Nothing scopes editability to a range and no keystroke is cancellable, so a marker can be half-deleted, split or reworded with no symptom. This is the one the case calls "the one that matters most", and it is the one nothing in this repo can imitate. |
 | **2. Carries a key, and can be enumerated** | Worked around | [`scanMarkers.ts`](src/internal/scanMarkers.ts) — a read-only transaction, a walk of every block, a regex over its plain text. |
+| **2a. One key over several positions** | Partly, and unsafely | See [One key, several occurrences](#one-key-several-occurrences). The writes work; the *addressing* does not survive an edit. |
 | **3. Survives a DOCX round trip** | **Unreachable** | `w:sdt` content controls are neither readable nor writable through the public API. A placeholder survives a round trip only as the literal text it already is: unprotected, and indistinguishable from prose the user typed. |
 | **4. Styled in the browser, and reports clicks** | Worked around | [`bandPainter.ts`](src/internal/bandPainter.ts) — our own divs, inline styles only, our own click listener mapped back to a key. It does at least keep the styling out of the exported document for free, since these divs were never part of it. |
 | **5. Can display a value without committing it** | **Unreachable** | The model has no distinction between displayed and stored content, so any value written is the value saved. |
@@ -62,6 +70,71 @@ two cannot be reached at all.
 `placeholders.protect()` and `placeholder.setDisplayValue()` exist in this repo's proposed
 namespace and reject with an `UnreachableError` that names the ask. That is deliberate: it is
 the honest shape of the request. Those two can only be added, not worked around.
+
+---
+
+## One key, several occurrences
+
+A party name, a defined term or a notice period appears many times in a contract, and which of
+those occurrences *are* the field is a judgement only the author can make. Sometimes just the
+one they selected. Sometimes all of them. Sometimes — genuinely — the first and the third.
+
+They all bind to **one key**: a template's `{{ party_name }}` is one field the author fills
+once, rendered everywhere it appears. So this is not N placeholders, it is one placeholder with
+N anchors — and the SDK already has that shape. `CommentThreadAnchor` attaches a thread to
+`TextAnchorRange[]`, explicitly supporting cross-paragraph and discontiguous anchors. A
+placeholder wants the same array:
+
+```ts
+// what we would like to write
+const hits = await doc.placeholders.findCandidates(selection);
+await doc.placeholders.add({ key: "receiver", anchors: [hits[0], hits[2]] });
+```
+
+The demo implements the whole thing — `findCandidates`, and `add` with
+`"selection" | "all" | { ordinals } | { limit }` or a predicate — so you can watch it work and
+watch what it costs. Three things go wrong, and only the third is fatal.
+
+**1. `searchText` reports nothing about what it found.** It returns an opaque range: no offset,
+no ordinal, no count, and no way to ask "which number is this one". So offering the author a
+choice at all needs a second full walk of the document, reading every paragraph's plain text
+and indexing the string by hand — [`findOccurrences.ts`](src/internal/findOccurrences.ts).
+
+**2. Order becomes load-bearing.** Every `setText` rewrites its paragraph, so each write shifts
+the offsets of every occurrence after it and invalidates any range obtained before it. The
+writes therefore go in **descending** offset order, which is what keeps each remaining target's
+ordinal meaning what it meant. Ascending order corrupts the second write onwards and produces a
+plausible-looking result. And a half-marked template — occurrence 1 replaced, 3 not — cannot be
+told from a correct one by looking, so the whole set goes in one transaction and any single
+unconfirmable target rolls all of it back.
+[`writeMarker.test.ts`](src/internal/writeMarker.test.ts) pins both rules against a fake that
+models `setText` faithfully.
+
+**3. An ordinal is not an identity — and this one cannot be fixed here.** An ordinal is a
+position in a snapshot of text. Between the author seeing the list and clicking Mint, any edit
+that adds or removes an earlier occurrence renumbers the rest, so "the 3rd" quietly means
+somewhere else — and `content.change` is typed `void`, so nothing carries enough information to
+notice (ask 02 · C).
+
+The only defence available is to make the caller carry the snapshot around and hand it back:
+`add({ …, against })` takes the candidate list the author was actually shown, and the write
+compares each candidate's paragraph text to the model and refuses the whole set if it moved.
+
+```
+Refused to write {{ receiver }} — The paragraph's text changed between listing the
+occurrences and writing them, so the offsets no longer address what they did.
+```
+
+That is the honest outcome, and it is still a bad one: the author is told "no" for a request
+that was correct when they made it, and the only alternative is to write to the wrong place.
+Note also what the guard requires — the API has to accept a copy of the document's own text
+back from its caller in order to be safe. An anchor array maintained by the SDK needs none of
+it, because an anchor is a thing rather than a count.
+
+> This is the part of ask 01 · property 2 that reads like ergonomics and is not. "Carries a key
+> we choose, and can be enumerated" is cheap. Carrying a key across *several positions*, so
+> that it still means the same positions after an edit, is the same problem as protection
+> (property 1) wearing a different hat.
 
 ---
 
@@ -190,19 +263,23 @@ src/
     selectionGeometry.ts   text hit-testing, reimplemented             (02 · A)
     shadowDom.ts           page + viewport located by CSS heuristic    (02 · A, 02 · D)
     scanMarkers.ts         enumeration by regex over every block       (01 · 2)
-    writeMarker.ts         a range recovered by counting searchText    (02 · B)
+    findOccurrences.ts     a second walk, to index repeats by hand     (02 · B)
+    writeMarker.ts         a range recovered by counting searchText,
+                           and N of them written in forced order       (02 · B, 01 · 2)
     bandPainter.ts         our own divs, inline styles only            (01 · 4)
     useTextSelection.ts    capture-phase, passive pointer interception (02 · A)
     trace.ts               the instrumentation behind the right panel
   proposed/
-    placeholders.ts        the API we wanted, and what each member costs
+    placeholders.ts        the API we wanted, and what each member costs.
+                           The app is written AGAINST this file; it delegates
+                           to internal/ rather than faking its answers.
   sdk/mountEditor.ts       boot, with the blank-page fix
   app/                     the page itself
 ```
 
 `src/internal/bandGeometry.ts`, `selectionGeometry.ts` and `snapshotLayout.ts` are ported from
 Wordsmith's production code with their unit tests
-([55 tests](src/internal), `pnpm test`), which run against a **real captured layout snapshot**
+(`pnpm test` — 75 tests), which run against a **real captured layout snapshot**
 in [`src/internal/__fixtures__`](src/internal/__fixtures__) — so the geometry is verifiable
 without a browser.
 

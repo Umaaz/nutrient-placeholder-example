@@ -10,7 +10,15 @@
 // identically. It exists so the cost is countable instead of anecdotal.
 
 /** The user-facing capability an internal access was in service of. */
-export type Capability = "scan" | "paint" | "select" | "mint" | "sync" | "zoom" | "scroll";
+export type Capability =
+  | "scan"
+  | "paint"
+  | "select"
+  | "occurrences"
+  | "mint"
+  | "sync"
+  | "zoom"
+  | "scroll";
 
 /** How far outside the public API surface one access reaches. */
 export type Reach =

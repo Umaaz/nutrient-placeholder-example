@@ -260,14 +260,16 @@ button { font: inherit; color: inherit; }
   z-index: 40;
   transform: translateX(-50%);
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
+  max-width: min(560px, calc(100vw - 24px));
   padding: 8px 10px;
   background: var(--surface);
   border: 1px solid var(--rule-strong);
   border-radius: 5px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
 }
+.mint-row { display: flex; align-items: center; gap: 8px; }
 .mint .quoted {
   font-family: var(--f-mono);
   font-size: 11px;
@@ -297,3 +299,71 @@ button { font: inherit; color: inherit; }
 }
 .flash.ok { background: var(--proposed-wash); color: var(--proposed); }
 .flash.bad { background: var(--blocked-wash); color: var(--blocked); }
+
+/* ── occurrence picker ─────────────────────────────────────────────────────── */
+.mint-occurrences {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--rule);
+}
+
+.mint-modes { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.mint-count {
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  color: var(--accent-ink);
+  background: var(--accent-wash);
+  border-radius: 2px;
+  padding: 1px 6px;
+}
+.mint-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.mint-mode.on { color: var(--ink); }
+.mint-mode input { margin: 0; }
+
+.mint-pick {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 168px;
+  overflow-y: auto;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--surface-sunk);
+}
+.mint-pick li + li { border-top: 1px solid var(--rule); }
+.mint-pick label {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+.mint-pick label:hover { background: var(--surface); }
+.mint-pick input { margin: 0; flex: 0 0 auto; }
+.mint-ord {
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  flex: 0 0 26px;
+}
+.mint-ctx {
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.mint-ctx mark { background: var(--accent-wash); color: var(--accent-ink); padding: 0 1px; }
+
+.mint-note { margin: 0; font-size: 11px; line-height: 1.45; color: var(--muted); }

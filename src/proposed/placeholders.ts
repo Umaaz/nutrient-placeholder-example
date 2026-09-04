@@ -32,10 +32,11 @@
 import type { DocAuthDocument, DocAuthEditor } from "@nutrient-sdk/document-authoring";
 
 import type { BlockRef, TokenRect } from "@/internal/bandGeometry";
+import { findOccurrences } from "@/internal/findOccurrences";
 import { markerFor, scanMarkers } from "@/internal/scanMarkers";
 import { scrollViewportTo } from "@/internal/shadowDom";
 import { findPageDivs, findTokenRects, findViewport, getDocumentContext, pageBoxWidthPx } from "@/internal/snapshotLayout";
-import { writeMarkerOverText } from "@/internal/writeMarker";
+import { writeMarkerOverOccurrences } from "@/internal/writeMarker";
 
 /** Thrown by a member that cannot be built on internals at any cost. */
 export class UnreachableError extends Error {
@@ -91,6 +92,33 @@ export const manifest: readonly ManifestEntry[] = [
     ask: "01 · 2",
     route:
       "useTextSelection + selectionGeometry to re-derive the selection from raw pointer coordinates, then writeMarker to recover a Range by stepping searchText().",
+  },
+  {
+    signature: "doc.placeholders.findCandidates(selection)",
+    purpose:
+      "List every occurrence of the selected phrase, so the author can pick which of them the field covers.",
+    status: "shim",
+    ask: "02 · B",
+    route:
+      "findOccurrences — a second full document walk plus String.indexOf, because searchText returns an opaque range and reports no offset, no ordinal and no count.",
+  },
+  {
+    signature: "add({ key, occurrences: \"all\" | { ordinals: [0, 2] } | { limit: n } })",
+    purpose:
+      "One key over several occurrences — the 1st and the 3rd, all of them, or the first n. A field the author fills once, rendered everywhere it appears.",
+    status: "degraded",
+    ask: "01 · 2",
+    route:
+      "writeMarkerOverOccurrences applies N text replacements in one transaction, in descending offset order because each write shifts the others, and rolls the whole set back if any range cannot be re-confirmed. Correct, but the occurrences are addressed by ORDINAL — a position in a snapshot of text, not an identity.",
+  },
+  {
+    signature: "placeholder.anchors  // TextAnchorRange[]",
+    purpose:
+      "The positions a placeholder is bound to, maintained by the SDK across edits — exactly what CommentThreadAnchor already gives a comment thread.",
+    status: "unreachable",
+    ask: "01 · 2",
+    route:
+      "Nothing survives an edit. An ordinal renumbers silently when an earlier occurrence is added or removed, and no event says so (content.change is typed void), so \"the 3rd\" quietly means somewhere else. The guard can refuse the write; it cannot keep the anchor.",
   },
   {
     signature: "placeholder.rects()",
@@ -183,11 +211,114 @@ export type Placeholder = {
 
 export type PlaceholderRectsResult = { pageIndex: number; rects: PlaceholderRect[] } | null;
 
+/**
+ * One candidate occurrence of a phrase, as `findCandidates` returns them.
+ *
+ * In the proposed API this would carry a `TextAnchorRange` and `ordinal` would be a
+ * convenience, not the address. Here the ordinal IS the address, which is the problem — see
+ * `OCCURRENCE_ORDINALS_ARE_NOT_IDENTITIES` below.
+ */
+export type PlaceholderCandidate = {
+  /** 0-based position in document order. */
+  ordinal: number;
+  /** 0-based position among the occurrences in this block alone. */
+  ordinalInBlock: number;
+  blockRef: BlockRef;
+  blockText: string;
+  charStart: number;
+  charEnd: number;
+  /** Surrounding text, so the author can tell two occurrences apart. */
+  contextBefore: string;
+  contextAfter: string;
+  /** True for the occurrence the user's own selection covers. */
+  isSelection: boolean;
+};
+
+/**
+ * Which occurrences of a repeated phrase become part of the placeholder.
+ *
+ * A template's `{{ party_name }}` in three places is ONE field, filled once, rendered three
+ * times — so this selects the ANCHORS of a single keyed placeholder, not three placeholders.
+ * That is the same shape the SDK already uses for comments: `CommentThreadAnchor` attaches a
+ * thread to `TextAnchorRange[]`, explicitly supporting discontiguous anchors.
+ */
+export type OccurrenceSelection =
+  /** Only the range the user actually selected. The default, and the cheapest. */
+  | "selection"
+  /** Every occurrence within `scope`. */
+  | "all"
+  /** Specific ones by 0-based document order — `{ ordinals: [0, 2] }` is the 1st and the 3rd. */
+  | { ordinals: readonly number[] }
+  /** The first N in document order. */
+  | { limit: number }
+  /** Anything else — filter the candidate list yourself. */
+  | ((candidate: PlaceholderCandidate) => boolean);
+
+/** Where to look for repeats. The case's own example is "several times in one paragraph". */
+export type OccurrenceScope = "document" | "block";
+
+/**
+ * Why the selection above is a workaround and not a design.
+ *
+ * Every variant except `"selection"` addresses occurrences by ORDINAL, and an ordinal is a
+ * position in a snapshot of text — not an identity. Between listing the candidates and
+ * writing them, any edit that inserts or removes an earlier occurrence renumbers every one
+ * after it. "The 3rd" then silently means somewhere else, and no event carries enough
+ * information to notice (`content.change` is typed void — ask 02 · C).
+ *
+ * The guard is only as good as what the caller passes. `add` resolves a selection against a
+ * candidate list; if it lists that itself at write time, the ordinals are resolved against the
+ * text as it is NOW and "the 3rd" quietly means whatever is third now. So a caller that showed
+ * the author a list MUST hand that list back via `against`, and then
+ * `writeMarkerOverOccurrences` compares each candidate's `blockText` to the model and refuses
+ * the whole set if the paragraph moved.
+ *
+ * Note what that means: to be safe, the caller has to carry a snapshot of the document's text
+ * around between rendering a list and acting on it, and the API has to take it back. An anchor
+ * array maintained by the SDK — as comment threads already have — needs none of that, because
+ * an anchor is a thing rather than a count. That is the substance of the ask, not the
+ * ergonomics.
+ */
+export const OCCURRENCE_ORDINALS_ARE_NOT_IDENTITIES = true;
+
 export type AddPlaceholderParams = {
   key: string;
   /** The selection to mint from, as this demo's internal lane derived it. */
   from: { blockRef: BlockRef; blockText: string; charStart: number; charEnd: number };
+  /** Which occurrences of the selected phrase to bind to `key`. Defaults to `"selection"`. */
+  occurrences?: OccurrenceSelection;
+  /** Where to look for repeats. Defaults to `"document"`. */
+  scope?: OccurrenceScope;
+  /**
+   * The candidate list the selection was made against — whatever was shown to the author.
+   *
+   * Pass it whenever an ordinal or a predicate came from a list a human looked at. Each
+   * candidate carries the `blockText` it was listed against, and the write refuses the whole
+   * set if the model no longer agrees — so an edit between listing and clicking is a visible
+   * refusal rather than a silent renumbering.
+   *
+   * Omit it and `add` lists fresh, which resolves ordinals against the text as it is now.
+   * That is correct only when nothing human happened in between.
+   */
+  against?: readonly PlaceholderCandidate[];
 };
+
+/** Resolve an `OccurrenceSelection` against a candidate list, in document order. */
+export function selectOccurrences(
+  candidates: readonly PlaceholderCandidate[],
+  selection: OccurrenceSelection,
+): PlaceholderCandidate[] {
+  if (selection === "all") return [...candidates];
+  if (selection === "selection") return candidates.filter((candidate) => candidate.isSelection);
+  if (typeof selection === "function") return candidates.filter(selection);
+  if ("ordinals" in selection) {
+    // Deduplicated and put back into document order, so `[2, 0]` and `[0, 2]` mean the same
+    // thing — the write below depends on a stable order and refuses duplicates outright.
+    const wanted = new Set(selection.ordinals);
+    return candidates.filter((candidate) => wanted.has(candidate.ordinal));
+  }
+  return candidates.slice(0, Math.max(0, selection.limit));
+}
 
 /**
  * The `placeholders` namespace, bound to a mounted document.
@@ -205,21 +336,26 @@ export function placeholders(doc: DocAuthDocument, editor: DocAuthEditor, contai
 
     rects: () => {
       const documentContext = getDocumentContext(editor);
-      const firstBlock = field.blocks[0];
       const pageDivs = findPageDivs(container);
-      if (!documentContext || !firstBlock || pageDivs.length === 0) return null;
-      // Which page a block is on is itself unknown until the walk finds it, so every page
-      // width is a candidate for the pt→px scale. Page 0's is used, which is correct only
-      // because every page in these fixtures is the same size.
-      const found = findTokenRects(
-        documentContext,
-        firstBlock.sectionIndex,
-        firstBlock.blockIndex,
-        field.marker,
-        pageBoxWidthPx(pageDivs[0]),
-        firstBlock.rowIndex ?? null,
-      );
-      return found ? { pageIndex: found.pageIndex, rects: found.rects } : null;
+      if (!documentContext || pageDivs.length === 0) return null;
+      // Which page a block is on is unknown until the walk finds it, so every page width is a
+      // candidate for the pt→px scale. Page 0's is used, which is correct only because every
+      // page in these fixtures is the same size.
+      const pageDivWidthPx = pageBoxWidthPx(pageDivs[0]);
+      // One walk of the internal layout tree PER BLOCK, because the walker takes a single
+      // target block and there is no way to ask it for several at once.
+      for (const block of field.blocks) {
+        const found = findTokenRects(
+          documentContext,
+          block.sectionIndex,
+          block.blockIndex,
+          field.marker,
+          pageDivWidthPx,
+          block.rowIndex ?? null,
+        );
+        if (found && found.rects.length > 0) return { pageIndex: found.pageIndex, rects: found.rects };
+      }
+      return null;
     },
 
     protected: false,
@@ -243,18 +379,88 @@ export function placeholders(doc: DocAuthDocument, editor: DocAuthEditor, contai
       return field ? build(field) : undefined;
     },
 
-    /** Ask 01 · 2. Shimmed by `writeMarkerOverText`. Resolves false when the write refused. */
-    add: async ({ key, from }: AddPlaceholderParams): Promise<boolean> =>
-      writeMarkerOverText(doc, from, markerFor(key)),
+    /**
+     * Ask 01 · 2. Every occurrence of the selected phrase, in document order, so the author
+     * can be offered a choice between them.
+     *
+     * A whole extra document walk, because `searchText` reports no offset, ordinal or count.
+     */
+    findCandidates: async (
+      from: AddPlaceholderParams["from"],
+      scope: OccurrenceScope = "document",
+    ): Promise<PlaceholderCandidate[]> =>
+      findOccurrences({
+        doc,
+        phrase: from.blockText.slice(from.charStart, from.charEnd),
+        selection: { blockRef: from.blockRef, charStart: from.charStart },
+        withinBlock: scope === "block" ? from.blockRef : null,
+      }),
 
-    /** Ask 02 · D. Shimmed by locating the scroll container in the shadow root. */
+    /**
+     * Ask 01 · 2. Bind `key` to the chosen occurrences of the selected phrase.
+     *
+     * One key, N anchors — a field the author fills once, rendered everywhere it appears.
+     * Shimmed by `writeMarkerOverOccurrences`, which writes the same marker over each chosen
+     * range in one transaction and rolls the whole set back if any one of them cannot be
+     * confirmed. Resolves the refusal reason, or null on success.
+     */
+    add: async ({
+      key,
+      from,
+      occurrences = "selection",
+      scope = "document",
+      against,
+    }: AddPlaceholderParams): Promise<{ written: number; refusal: string | null }> => {
+      const phrase = from.blockText.slice(from.charStart, from.charEnd);
+      // `"selection"` needs no candidate walk: the caller already holds the one range.
+      if (occurrences === "selection") {
+        return writeMarkerOverOccurrences(
+          doc,
+          [{ blockRef: from.blockRef, blockText: from.blockText, charStart: from.charStart, charEnd: from.charEnd }],
+          markerFor(key),
+        );
+      }
+
+      // `against` is the list the author actually saw. Re-listing here instead would resolve
+      // their ordinals against the text as it is now — see the note above.
+      const candidates =
+        against ??
+        (await findOccurrences({
+          doc,
+          phrase,
+          selection: { blockRef: from.blockRef, charStart: from.charStart },
+          withinBlock: scope === "block" ? from.blockRef : null,
+        }));
+      const chosen = selectOccurrences(candidates, occurrences);
+      if (chosen.length === 0) {
+        return { written: 0, refusal: `No occurrence of “${phrase}” matched the selection.` };
+      }
+      return writeMarkerOverOccurrences(
+        doc,
+        chosen.map((candidate) => ({
+          blockRef: candidate.blockRef,
+          blockText: candidate.blockText,
+          charStart: candidate.charStart,
+          charEnd: candidate.charEnd,
+        })),
+        markerFor(key),
+      );
+    },
+
+    /**
+     * Ask 02 · D. Shimmed by locating the scroll container in the shadow root and assembling
+     * the offset by hand from a page's client rect, its own pt→px scale and the field's rect.
+     */
     scrollIntoView: (pageIndex: number, topPx: number): boolean => {
       const viewport = findViewport(container);
       const pageDiv = findPageDivs(container)[pageIndex];
       if (!viewport || !pageDiv) return false;
-      const pageTop = pageDiv.getBoundingClientRect().top - viewport.getBoundingClientRect().top;
-      const scale = pageDiv.offsetHeight > 0 ? pageDiv.getBoundingClientRect().height / pageDiv.offsetHeight : 1;
-      scrollViewportTo(viewport, viewport.scrollTop + pageTop + topPx * scale - 80);
+      const rendered = pageDiv.getBoundingClientRect();
+      const pageTop = rendered.top - viewport.getBoundingClientRect().top;
+      const scale = pageDiv.offsetHeight > 0 ? rendered.height / pageDiv.offsetHeight : 1;
+      // A third of the way down rather than flush to the top, so the field lands with its
+      // surrounding clause visible.
+      scrollViewportTo(viewport, viewport.scrollTop + pageTop + topPx * scale - viewport.clientHeight / 3);
       return true;
     },
 

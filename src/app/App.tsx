@@ -1,20 +1,30 @@
 // The demo, in one page.
 //
-// Reading order: this file drives the five things the case describes — mount, scan, paint,
-// select, mint — and every one of them goes through `src/internal/`, which is where the cost
-// lives. `src/proposed/placeholders.ts` is the API each of them should have called instead.
+// Written against the API we WANT. Every action below — scan, paint, select, mint,
+// scroll-to-field — is a call on the `placeholders` namespace in
+// `src/proposed/placeholders.ts`, which is the shape this file wishes the SDK exposed.
+//
+// That namespace is not a mock. It delegates to `src/internal/`, which is the pile of
+// workarounds that has to exist underneath it: a Symbol() probe, a layout-tree walk, text
+// hit-testing reimplemented from pointer coordinates, and a range recovered by counting
+// searchText matches. So the two lanes in the right-hand panel are the same code path seen
+// from both ends — and the reach counters are what the top half costs the bottom.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { DocAuthDocument, DocAuthEditor } from "@nutrient-sdk/document-authoring";
 
 import { type BandGroup, MINTED_ACCENT, PLACEHOLDER_ACCENT, clearBands, paintBands } from "@/internal/bandPainter";
-import { type ScannedField, scanMarkers } from "@/internal/scanMarkers";
-import { findPageDivs, findTokenRects, findViewport, getDocumentContext, pageBoxWidthPx } from "@/internal/snapshotLayout";
-import { scrollViewportTo } from "@/internal/shadowDom";
+import { markerFor } from "@/internal/scanMarkers";
+import { findPageDivs } from "@/internal/snapshotLayout";
 import { type Capability, type TraceEntry, resetTrace, subscribeToTrace, trace } from "@/internal/trace";
 import { useTextSelection } from "@/internal/useTextSelection";
-import { writeMarkerOverText } from "@/internal/writeMarker";
-import { markerFor } from "@/internal/scanMarkers";
+import {
+  type OccurrenceSelection,
+  type Placeholder,
+  type PlaceholderCandidate,
+  type PlaceholdersNamespace,
+  placeholders,
+} from "@/proposed/placeholders";
 import { mountEditor } from "@/sdk/mountEditor";
 
 import { ComparisonPanel } from "@/app/ComparisonPanel";
@@ -43,10 +53,12 @@ export function App() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<DocAuthEditor | null>(null);
   const docRef = useRef<DocAuthDocument | null>(null);
+  /** The proposed API, bound to the mounted document. Every action goes through it. */
+  const apiRef = useRef<PlaceholdersNamespace | null>(null);
 
   const [fixtureUrl, setFixtureUrl] = useState<string>(FIXTURES[0].url);
   const [booted, setBooted] = useState(false);
-  const [fields, setFields] = useState<readonly ScannedField[]>([]);
+  const [fields, setFields] = useState<readonly Placeholder[]>([]);
   const [groups, setGroups] = useState<ReadonlyMap<string, BandGroup>>(new Map());
   // Which fields the user minted in this session, so a new one paints in a distinct accent.
   // A ref, not state: `refresh` reads it and no render depends on it directly.
@@ -57,6 +69,8 @@ export function App() {
   const [liveCapability, setLiveCapability] = useState<Capability | null>(null);
   const [busy, setBusy] = useState(false);
   const [flash, setFlash] = useState<Flash>(null);
+  /** Every occurrence of the phrase under the current selection, for the mint card's picker. */
+  const [candidates, setCandidates] = useState<readonly PlaceholderCandidate[]>([]);
 
   useEffect(() => subscribeToTrace((entries) => setTraceEntries([...entries])), []);
 
@@ -116,6 +130,7 @@ export function App() {
         if (cancelled) return;
         editorRef.current = mounted.editor;
         docRef.current = mounted.doc;
+        apiRef.current = placeholders(mounted.doc, mounted.editor, container);
         setBooted(true);
       } catch (error) {
         if (!cancelled) setFlash({ kind: "bad", text: `Could not load the document: ${String(error)}` });
@@ -128,6 +143,7 @@ export function App() {
       if (changeTimer) clearTimeout(changeTimer);
       editorRef.current = null;
       docRef.current = null;
+      apiRef.current = null;
       // Chained onto this boot, not fired beside it: the next mount must not start until this
       // editor has actually gone.
       bootChainRef.current = boot.then(() => mounted?.destroy()).catch(() => undefined);
@@ -138,42 +154,31 @@ export function App() {
 
   // ── scan + resolve geometry ──────────────────────────────────────────────────
   /**
-   * Resolve every scanned field's rects. One walk of the internal layout tree per field,
-   * because the walkers take a target block and there is no way to ask for many at once.
+   * Turn the placeholder list into paintable band groups.
+   *
+   * `placeholder.rects()` is one walk of the internal layout tree PER PLACEHOLDER — the
+   * walker takes a single target block and there is no way to ask it for several at once. So
+   * this loop is O(fields) full traversals of the document's layout every time anything
+   * changes.
    */
   const resolveGroups = useCallback(
-    (scanned: readonly ScannedField[], minted: ReadonlySet<string>): Map<string, BandGroup> | null => {
-      const editor = editorRef.current;
+    (list: readonly Placeholder[], minted: ReadonlySet<string>): Map<string, BandGroup> | null => {
       const container = containerRef.current;
-      const resolved = new Map<string, BandGroup>();
-      if (!editor || !container) return null;
-      const documentContext = getDocumentContext(editor);
-      const pageDivs = findPageDivs(container);
       // Null, not an empty map: "the layout is not ready" and "no field could be placed" look
       // identical from here, and reporting the second when it was the first shows every field
       // as unplaceable. The caller keeps what it had instead.
-      if (!documentContext || pageDivs.length === 0) return null;
-      const pageDivWidthPx = pageBoxWidthPx(pageDivs[0]);
+      if (!container || findPageDivs(container).length === 0) return null;
 
-      for (const field of scanned) {
-        for (const block of field.blocks) {
-          const found = findTokenRects(
-            documentContext,
-            block.sectionIndex,
-            block.blockIndex,
-            field.marker,
-            pageDivWidthPx,
-            block.rowIndex ?? null,
-          );
-          if (!found || found.rects.length === 0) continue;
-          resolved.set(field.key, {
-            key: field.key,
-            accentHex: minted.has(field.key) ? MINTED_ACCENT : PLACEHOLDER_ACCENT,
-            pageIndex: found.pageIndex,
-            rects: found.rects,
-          });
-          break;
-        }
+      const resolved = new Map<string, BandGroup>();
+      for (const placeholder of list) {
+        const found = placeholder.rects();
+        if (!found || found.rects.length === 0) continue;
+        resolved.set(placeholder.key, {
+          key: placeholder.key,
+          accentHex: minted.has(placeholder.key) ? MINTED_ACCENT : PLACEHOLDER_ACCENT,
+          pageIndex: found.pageIndex,
+          rects: found.rects,
+        });
       }
       return resolved;
     },
@@ -181,11 +186,11 @@ export function App() {
   );
 
   const refresh = useCallback(async () => {
-    const doc = docRef.current;
-    if (!doc) return;
-    const scanned = await scanMarkers(doc);
-    setFields(scanned);
-    const resolved = resolveGroups(scanned, mintedKeysRef.current);
+    const api = apiRef.current;
+    if (!api) return;
+    const list = await api.all();
+    setFields(list);
+    const resolved = resolveGroups(list, mintedKeysRef.current);
     if (resolved) setGroups(resolved);
   }, [resolveGroups]);
 
@@ -241,34 +246,68 @@ export function App() {
     return () => window.removeEventListener("resize", repaint);
   }, [booted, refresh]);
 
+  // ── occurrences of the current selection ────────────────────────────────────
+  // Looked up as soon as a selection exists, so the mint card can offer a choice between
+  // repeats. `findCandidates` is a whole extra document walk, because `searchText` reports no
+  // offset, ordinal or count — see `findOccurrences.ts`.
+  useEffect(() => {
+    const api = apiRef.current;
+    if (!api || !selection) {
+      setCandidates([]);
+      return;
+    }
+    let cancelled = false;
+    setLiveCapability("occurrences");
+    void (async () => {
+      const found = await api.findCandidates({
+        blockRef: selection.blockRef,
+        blockText: selection.blockText,
+        charStart: selection.charStart,
+        charEnd: selection.charEnd,
+      });
+      if (!cancelled) setCandidates(found);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selection]);
+
   // ── mint ─────────────────────────────────────────────────────────────────────
   const mint = useCallback(
-    async (key: string) => {
-      const doc = docRef.current;
-      if (!doc || !selection) return;
+    async (key: string, occurrences: OccurrenceSelection) => {
+      const api = apiRef.current;
+      if (!api || !selection) return;
       setBusy(true);
       setLiveCapability("mint");
       try {
-        const written = await writeMarkerOverText(
-          doc,
-          {
+        const { written, refusal } = await api.add({
+          key,
+          from: {
             blockRef: selection.blockRef,
             blockText: selection.blockText,
             charStart: selection.charStart,
             charEnd: selection.charEnd,
           },
-          markerFor(key),
-        );
-        if (!written) {
-          setFlash({
-            kind: "bad",
-            text: `Refused to write ${markerFor(key)} — the range could not be confirmed against the model's spelling of the paragraph. See writeMarker.ts.`,
-          });
+          occurrences,
+          // The list the author was actually shown. Without this the ordinals they picked
+          // would be re-resolved against the document as it reads at write time.
+          against: candidates,
+        });
+        if (refusal !== null) {
+          // The write is all-or-nothing, so nothing was changed. Keep the card open: the
+          // request was reasonable and the user may want to retry a narrower one.
+          setFlash({ kind: "bad", text: `Refused to write ${markerFor(key)} — ${refusal}` });
           return;
         }
         clearSelection();
         mintedKeysRef.current.add(key);
-        setFlash({ kind: "ok", text: `Wrote ${markerFor(key)} into the document.` });
+        setFlash({
+          kind: "ok",
+          text:
+            written === 1
+              ? `Wrote ${markerFor(key)} into the document.`
+              : `Wrote ${markerFor(key)} over ${written} occurrences — one field, ${written} anchors.`,
+        });
         // The SDK re-lays out in place; wait for the snapshot to carry the new text.
         await new Promise((resolve) => setTimeout(resolve, RELAYOUT_SETTLE_MS));
         await refresh();
@@ -277,27 +316,20 @@ export function App() {
         setBusy(false);
       }
     },
-    [selection, clearSelection, refresh],
+    [selection, candidates, clearSelection, refresh],
   );
 
   // ── scroll to a field ────────────────────────────────────────────────────────
-  const reveal = useCallback((key: string) => {
-    setSelectedKey(key);
-    setLiveCapability("scroll");
-    const container = containerRef.current;
-    const group = groups.get(key);
-    if (!container || !group) return;
-    const viewport = findViewport(container);
-    const pageDiv = findPageDivs(container)[group.pageIndex];
-    if (!viewport || !pageDiv) return;
-    const rendered = pageDiv.getBoundingClientRect();
-    const scale = pageDiv.offsetHeight > 0 ? rendered.height / pageDiv.offsetHeight : 1;
-    const pageTop = rendered.top - viewport.getBoundingClientRect().top;
-    // A third of the way down, rather than flush to the top, so the field lands with its
-    // surrounding clause visible.
-    const target = viewport.scrollTop + pageTop + group.rects[0].top * scale - viewport.clientHeight / 3;
-    scrollViewportTo(viewport, target);
-  }, [groups]);
+  const reveal = useCallback(
+    (key: string) => {
+      setSelectedKey(key);
+      setLiveCapability("scroll");
+      const group = groups.get(key);
+      if (!group) return;
+      apiRef.current?.scrollIntoView(group.pageIndex, group.rects[0].top);
+    },
+    [groups],
+  );
 
   const withGeometry = bandGroups.length;
 
@@ -384,8 +416,9 @@ export function App() {
         <MintCard
           anchor={anchor}
           selectedText={selection.text}
+          candidates={candidates}
           busy={busy}
-          onMint={(key) => void mint(key)}
+          onMint={(key, occurrences) => void mint(key, occurrences)}
           onCancel={clearSelection}
         />
       )}

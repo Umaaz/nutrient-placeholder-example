@@ -11,6 +11,9 @@ import { type ManifestEntry, manifest } from "@/proposed/placeholders";
 const CAPABILITY_FOR_SIGNATURE: Record<string, Capability> = {
   "doc.placeholders.all()": "scan",
   "doc.placeholders.add({ key, fromSelection })": "mint",
+  "doc.placeholders.findCandidates(selection)": "occurrences",
+  'add({ key, occurrences: "all" | { ordinals: [0, 2] } | { limit: n } })': "mint",
+  "placeholder.anchors  // TextAnchorRange[]": "occurrences",
   "placeholder.rects()": "paint",
   "placeholder.style = { background, border }": "paint",
   'doc.placeholders.on("click", handler)': "paint",
