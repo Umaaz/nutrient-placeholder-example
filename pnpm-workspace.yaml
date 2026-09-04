@@ -1,0 +1,6 @@
+# esbuild's postinstall only links the platform binary that ships as its own package
+# (@esbuild/darwin-arm64 and friends), so allowing it is harmless and keeps `pnpm install`
+# quiet. An explicit decision is required by pnpm 11 — without one, install exits non-zero
+# with ERR_PNPM_IGNORED_BUILDS and `pnpm install && pnpm dev` never reaches dev.
+allowBuilds:
+  esbuild: true

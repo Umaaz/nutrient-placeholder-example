@@ -1,0 +1,28 @@
+{
+  "name": "nutrient-placeholder-example",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "A worked example of document placeholders on the Nutrient Document Authoring SDK, showing the internal APIs it currently requires beside the public API it should have used.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@nutrient-sdk/document-authoring": "1.19.1",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.9",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.2.4"
+  }
+}
