@@ -43,20 +43,27 @@ export function MintCard({ anchor, selectedText, busy, onMint, onCancel }: Props
   }, [selectedText]);
 
   // Measured and clamped after layout, because the clamp needs the card's real width and the
-  // card is sized by its content (the quoted phrase).
+  // card is sized by its content (the quoted phrase). Re-run on resize too: the clamp is
+  // against the viewport, so a window that changes size leaves a stale placement hanging off
+  // an edge.
   useLayoutEffect(() => {
-    const card = cardRef.current;
-    if (!card) return;
-    const { width, height } = card.getBoundingClientRect();
-    const half = width / 2;
-    const minCenter = half + EDGE_GAP_PX;
-    const maxCenter = window.innerWidth - half - EDGE_GAP_PX;
-    const left =
-      minCenter > maxCenter ? window.innerWidth / 2 : Math.min(Math.max(anchor.clientLeft, minCenter), maxCenter);
-    // Flip above the selection when there is no room below it.
-    const fitsBelow = anchor.clientTop + height + EDGE_GAP_PX <= window.innerHeight;
-    const top = fitsBelow ? anchor.clientTop : Math.max(EDGE_GAP_PX, anchor.clientTop - height - 24);
-    setPlaced({ left, top });
+    const place = () => {
+      const card = cardRef.current;
+      if (!card) return;
+      const { width, height } = card.getBoundingClientRect();
+      const half = width / 2;
+      const minCenter = half + EDGE_GAP_PX;
+      const maxCenter = window.innerWidth - half - EDGE_GAP_PX;
+      const left =
+        minCenter > maxCenter ? window.innerWidth / 2 : Math.min(Math.max(anchor.clientLeft, minCenter), maxCenter);
+      // Flip above the selection when there is no room below it.
+      const fitsBelow = anchor.clientTop + height + EDGE_GAP_PX <= window.innerHeight;
+      const top = fitsBelow ? anchor.clientTop : Math.max(EDGE_GAP_PX, anchor.clientTop - height - 24);
+      setPlaced({ left, top });
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
   }, [anchor.clientLeft, anchor.clientTop, selectedText]);
 
   const valid = /^[A-Za-z0-9_.-]{1,64}$/.test(key);
