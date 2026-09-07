@@ -9,13 +9,11 @@
 //  the same work and produce the same result. The `manifest` below records, per member, how
 //  many distinct reaches past the public API that delegation costs.
 //
-//  One of the five properties in ask 01 has no internal route at all. It is declared here and
-//  throws `UnreachableError`, because that is the honest shape of the request:
-//
-//    · `setDisplayValue`  — Rendering a value in place while the stored DOCX keeps the
-//                           placeholder needs a distinction between displayed and stored
-//                           content that the model does not have.
-//                           (Ask 01 · property 5.)
+//  `setDisplayValue` still throws `UnreachableError`, and deliberately: `previewValues.ts`
+//  CAN put a value on the page and make it reflow, but only by committing it. The half this
+//  member promises — displaying without storing — is not available at any price, because
+//  nothing distinguishes displayed from stored content. See "Filling a template in place" in
+//  the README. (Ask 01 · property 5.)
 //
 //  Protection — property 1, "the one that matters most" — turned out NOT to be unreachable,
 //  and this repo implements it. See `src/internal/placeholderGuard.ts`. A capture-phase
@@ -180,9 +178,10 @@ export const manifest: readonly ManifestEntry[] = [
   {
     signature: "placeholder.setDisplayValue(text)",
     purpose: "Preview a filled value in place, reflowing like text, while the stored DOCX keeps the placeholder.",
-    status: "unreachable",
+    status: "degraded",
     ask: "01 · 5",
-    route: "The model has no distinction between displayed and stored content, so any value written is the value saved.",
+    route:
+      "previewValues. Reflow forces the value into the model — an overlay cannot move the text after it — so this is a real edit plus a hand-kept record of how to undo it. The reflow and the styling work; \"without committing\" does not: nothing distinguishes displayed from stored content, so all five export paths must be wrapped to revert first, the field list vanishes while values show, and any edit during the preview strands the marker permanently.",
   },
   {
     signature: "// survives a DOCX round trip",
@@ -377,12 +376,17 @@ export function placeholders(
 
     protected: guardActive(),
 
+    // Still rejects, and deliberately so. `applyPreview` can put a value on the page and make
+    // it reflow — but this member promises to do that WITHOUT committing, and that half is
+    // what cannot be honoured: the value is a real edit, and every export path would have to
+    // be wrapped for the stored document to keep the placeholder. Offering it as if it worked
+    // would be the most dangerous thing in this file.
     setDisplayValue: () =>
       Promise.reject(
         new UnreachableError(
           "setDisplayValue",
           "01 · 5",
-          "the model has no distinction between displayed and stored content, so any value written is the value saved",
+          "a value can be made to reflow (see previewValues.ts), but only by committing it — nothing distinguishes displayed from stored content, so the placeholder survives a save only if the host wraps all five export paths by hand",
         ),
       ),
   });

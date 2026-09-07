@@ -17,6 +17,7 @@ export type Capability =
   | "caret"
   | "guard"
   | "occurrences"
+  | "preview"
   | "mint"
   | "sync"
   | "zoom"

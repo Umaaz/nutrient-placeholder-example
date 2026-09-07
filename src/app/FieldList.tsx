@@ -19,13 +19,27 @@ type Props = {
   /** Keyed by field key — absent means the layout walkers could not place it. */
   groups: ReadonlyMap<string, BandGroup>;
   selectedKey: string | null;
+  /**
+   * True when the list is empty only because values are being previewed.
+   *
+   * Worth distinguishing: an empty list normally means "nothing found", but during a preview
+   * it means "the markers are temporarily not there" — which is the same fact ask 01 ·
+   * property 2 is about, since the list is derived by scanning for marker text.
+   */
+  emptyBecausePreviewing?: boolean;
   onHover: (key: string | null) => void;
   onSelect: (key: string) => void;
 };
 
-export function FieldList({ fields, groups, selectedKey, onHover, onSelect }: Props) {
+export function FieldList({ fields, groups, selectedKey, onHover, onSelect, emptyBecausePreviewing }: Props) {
   if (fields.length === 0) {
-    return <p className="empty">No placeholders found. Scan the document, or select a phrase and mint one.</p>;
+    return (
+      <p className="empty">
+        {emptyBecausePreviewing
+          ? "Values are showing, so there are no markers to scan for. Revert on the Fill values tab to get the list back."
+          : "No placeholders found. Scan the document, or select a phrase and mint one."}
+      </p>
+    );
   }
   return (
     <ul className="fields" onPointerLeave={() => onHover(null)}>

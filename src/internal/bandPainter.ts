@@ -30,6 +30,8 @@ const BAND_KEY_ATTR = "data-placeholder-key";
 export const PLACEHOLDER_ACCENT = "#F5C44A";
 /** Accent for a field the user just minted, so a new one is distinguishable at a glance. */
 export const MINTED_ACCENT = "#7F77DD";
+/** Accent for a placeholder currently showing a filled value — ask 01 · property 5. */
+export const FILLED_ACCENT = "#1D9E75";
 
 const FILL_REST = 0.24;
 const FILL_HOVER = 0.42;

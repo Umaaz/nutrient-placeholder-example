@@ -49,6 +49,7 @@ key is optional — the demo runs without one; copy `.env.example` to `.env` to 
 | Click a field row | Scroll-to-field, via a scroll container located by a CSS heuristic | 02 · D |
 | Type in the document | Every placeholder is re-scanned and re-placed from scratch, because the change event carries nothing | 02 · C |
 | Switch on **Protect placeholders**, click into a marker and type | The keystroke is refused and the marker survives; arrow keys keep the protection alive, but Enter voids it and the panel says so | 01 · 1 |
+| **Fill values** → Fill, then **Check what a save would contain** | Values reflow natively and stay styled — and a save taken now stores 0 of 9 placeholders | 01 · 5 |
 | Switch to `multi-section-nda.docx` and mint past the section break | The write is **refused** — see [Known limitations](#known-limitations) | — |
 | The **Internal reaches** log | Each reach, what it touched, and why the public API could not answer | — |
 
@@ -62,7 +63,7 @@ actually did.
 ## The five things ask 01 wants, and where each one stands
 
 Ask 01 asks for a protected, keyed text range. Of its five properties, two can be worked
-around, one is only *partly* reachable, and two cannot be reached at all.
+around, two are only *partly* reachable, and one cannot be reached at all.
 
 | Property | Status here | Why |
 | --- | --- | --- |
@@ -71,16 +72,18 @@ around, one is only *partly* reachable, and two cannot be reached at all.
 | **2a. One key over several positions** | Partly, and unsafely | See [One key, several occurrences](#one-key-several-occurrences). The writes work; the *addressing* does not survive an edit. |
 | **3. Survives a DOCX round trip** | **Unreachable** | `w:sdt` content controls are neither readable nor writable through the public API. A placeholder survives a round trip only as the literal text it already is: unprotected, and indistinguishable from prose the user typed. |
 | **4. Styled in the browser, and reports clicks** | Worked around | [`bandPainter.ts`](src/internal/bandPainter.ts) — our own divs, inline styles only, our own click listener mapped back to a key. It does at least keep the styling out of the exported document for free, since these divs were never part of it. |
-| **5. Can display a value without committing it** | **Unreachable** | The model has no distinction between displayed and stored content, so any value written is the value saved. |
+| **5. Can display a value without committing it** | Half of it | The value reflows and stays styled — see [Filling a template in place](#filling-a-template-in-place). But "without committing" is not achievable: it is a real edit plus a promise to undo it, and a save taken while values are showing stores a filled contract. |
 
-`placeholder.setDisplayValue()` exists in this repo's proposed namespace and rejects with an
-`UnreachableError` naming the ask. That is deliberate: it is the honest shape of the request.
-Properties 3 and 5 can only be added, not worked around.
+Only property 3 is flatly unreachable: `w:sdt` content controls are neither readable nor
+writable, so nothing can make a placeholder survive a round trip as anything other than the
+literal text it already is.
 
-`placeholders.protect()` does **not** throw, because protection turned out to be partly
-buildable — see below. An earlier version of this README said no keystroke was cancellable.
-That was wrong, and it understated the ask by describing it as impossible rather than as
-unsafe.
+Two earlier claims in this README were wrong, and both understated the ask by calling it
+impossible rather than unsafe. Protection was listed as unreachable on the grounds that no
+keystroke was cancellable — it is. And displaying a value was listed as unreachable on the
+grounds that the model cannot separate displayed from stored content — it cannot, but that
+turns out to block only *half* the requirement. Both are now built, and both sections below
+say exactly where they stop working.
 
 ---
 
@@ -191,6 +194,87 @@ one is a placeholder that may already be broken, with nothing able to detect it.
 > It is: the only available implementation depends on out-guessing the SDK about which DOM
 > event it reads, and on a caret model that cannot be kept correct — and when it fails, it
 > fails silently, in a document whose whole value is that it is exact.
+
+---
+
+## Filling a template in place
+
+Property 5 asks for a value that "renders in place, reflowing like ordinary text, still styled
+as a placeholder", while "the stored DOCX keeps the placeholder, not the value". Switch to the
+**Fill values** tab and press Fill: the values appear, the paragraphs re-wrap around them, and
+each one keeps a highlight in a distinct colour.
+
+The two halves of that requirement pull against each other, and which one you can have is
+decided by reflow.
+
+### Why an overlay cannot do it
+
+We already draw our own divs over the document, so the obvious approach is to draw the value
+over the marker and leave the document alone — which would satisfy "the stored DOCX keeps the
+placeholder" for free, since the document would never change.
+
+It does not work, because `{{ effective_date }}` is 20 characters and `12 March 2026` is 13.
+An overlay does not move the text after it, so the value would either be squeezed into the
+marker's box or overlap the following words. Only the SDK lays out text. **Reflow forces the
+value into the model.**
+
+### So it is an edit plus a promise
+
+[`previewValues.ts`](src/internal/previewValues.ts) writes the values and records how to undo
+each one. The same two rules as the multi-occurrence write apply, for the same reason — every
+`setText` shifts the offsets after it, so writes go in descending order within each block, and
+the whole pass is one transaction. Each value's final offset is computed *arithmetically*
+rather than by searching, because a value like `2026` may also appear as ordinary prose and a
+search would find the wrong one. There is a test for exactly that.
+
+Reverting restores the paragraph byte-for-byte, which the tests assert across several
+paragraphs and values of differing lengths.
+
+### And here is the half that is not achievable
+
+Press **Check what a save would contain** while values are showing. It serialises the document
+the way a host would to store it, and reports:
+
+```
+0 of 9 placeholders survived, 9 were baked in as real values.
+```
+
+That is not a bug in the demo — it is the requirement failing. Nothing in the API distinguishes
+a previewed value from real content: there is no `displayValue`, no field concept, no
+content-control access. So "the stored DOCX keeps the placeholder" is not a property of the
+document, it is a promise the host has to keep by wrapping **every** path that reads it:
+
+```ts
+saveDocument()  saveDocumentJSONString()  exportPDF()  exportDOCX()  export(config)
+```
+
+Five paths, each of which must revert, export, and re-apply. Miss one — or add one in a future
+version — and a template is silently saved as a filled contract.
+
+### Three more things it costs
+
+**The field list disappears.** The list is built by scanning for `{{ … }}` text, so filling the
+template destroys the list of what was filled. The panel keeps showing rows only because it
+falls back to *our own record* of the preview — and that record is the only way back to the
+template. Lose it (a refresh, a crash) and the markers are gone for good.
+
+**The highlight has to be re-derived from the value.** With the marker gone there is no marker
+text to locate, so the bands are recomputed by searching for the *value* at the recorded block.
+That mislocates a value which also occurs as prose in the same paragraph, and resolves only the
+first block when one key was filled in several.
+
+**Any edit during the preview strands the marker permanently.** Between applying and reverting,
+the document is an ordinary editable document holding real values. If the user types in a
+filled paragraph, the recorded offsets no longer describe it and the revert refuses:
+
+```
+Block 3 was edited while the preview was showing, so the markers cannot be put back
+where they came from.
+```
+
+Refusing is the best available behaviour — writing markers over text that has moved would
+corrupt the template rather than restore it — but the outcome is a template that is now stuck
+holding a value, with no way back. A region the SDK owned would simply not have this failure.
 
 ---
 
@@ -392,6 +476,8 @@ src/
     caretModel.ts          a shadow caret and caret navigation, both
                            reimplemented because neither is readable   (01 · 1)
     placeholderGuard.ts    keystroke refusal, and where it leaks       (01 · 1)
+    previewValues.ts       filling in place, and the promise to undo
+                           it that every export path must honour       (01 · 5)
     trace.ts               the instrumentation behind the right panel
   proposed/
     placeholders.ts        the API we wanted, and what each member costs.
@@ -403,7 +489,7 @@ src/
 
 `src/internal/bandGeometry.ts`, `selectionGeometry.ts` and `snapshotLayout.ts` are ported from
 Wordsmith's production code with their unit tests
-(`pnpm test` — 109 tests), which run against a **real captured layout snapshot**
+(`pnpm test` — 122 tests), which run against a **real captured layout snapshot**
 in [`src/internal/__fixtures__`](src/internal/__fixtures__) — so the geometry is verifiable
 without a browser.
 

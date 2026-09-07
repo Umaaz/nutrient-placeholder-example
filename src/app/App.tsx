@@ -13,11 +13,25 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { DocAuthDocument, DocAuthEditor } from "@nutrient-sdk/document-authoring";
 
-import { type BandGroup, MINTED_ACCENT, PLACEHOLDER_ACCENT, clearBands, paintBands } from "@/internal/bandPainter";
+import {
+  type BandGroup,
+  FILLED_ACCENT,
+  MINTED_ACCENT,
+  PLACEHOLDER_ACCENT,
+  clearBands,
+  paintBands,
+} from "@/internal/bandPainter";
 import { type CaretState, seedCaretFromClick } from "@/internal/caretModel";
 import { type GuardDecision, installPlaceholderGuard } from "@/internal/placeholderGuard";
+import {
+  type PreviewState,
+  type SaveAudit,
+  applyPreview,
+  auditSavedDocument,
+  revertPreview,
+} from "@/internal/previewValues";
 import { markerFor } from "@/internal/scanMarkers";
-import { findPageDivs } from "@/internal/snapshotLayout";
+import { findPageDivs, findTokenRects, getDocumentContext, pageBoxWidthPx } from "@/internal/snapshotLayout";
 import { type Capability, type TraceEntry, resetTrace, subscribeToTrace, trace } from "@/internal/trace";
 import { useTextSelection } from "@/internal/useTextSelection";
 import {
@@ -31,6 +45,7 @@ import { mountEditor } from "@/sdk/mountEditor";
 
 import { ComparisonPanel } from "@/app/ComparisonPanel";
 import { GuardPanel } from "@/app/GuardPanel";
+import { PreviewPanel } from "@/app/PreviewPanel";
 import { FieldList } from "@/app/FieldList";
 import { MintCard } from "@/app/MintCard";
 import { TracePanel } from "@/app/TracePanel";
@@ -89,6 +104,21 @@ export function App() {
   /** Mirrors `guardOn` for the namespace's `protected` getter, which is built at boot. */
   const guardOnRef = useRef(false);
   guardOnRef.current = guardOn;
+
+  // ── value preview (ask 01 · property 5) ──────────────────────────────────────
+  const [preview, setPreview] = useState<PreviewState | null>(null);
+  /** Mirrors `preview` for `refresh`, which must not be rebuilt every time it changes. */
+  const previewRef = useRef<PreviewState | null>(null);
+  previewRef.current = preview;
+  const [audit, setAudit] = useState<SaveAudit | null>(null);
+  const [previewRefusal, setPreviewRefusal] = useState<string | null>(null);
+
+  /**
+   * Which rail panel is showing. Four panels stacked in a 340px column did not fit — and
+   * squeezing them was what broke the layout the first time. Two of them are controls
+   * (protection, filling) and two are evidence (the lanes, the trace), so they take turns.
+   */
+  const [tab, setTab] = useState<"cost" | "protect" | "fill" | "trace">("cost");
 
   useEffect(() => subscribeToTrace((entries) => setTraceEntries([...entries])), []);
 
@@ -203,14 +233,61 @@ export function App() {
     [],
   );
 
+  /**
+   * Bands for a filled value — ask 01 · property 5's "still styled as a placeholder".
+   *
+   * A separate path from `resolveGroups`, because once the values are in the document there
+   * is no marker text to look for. The geometry has to be re-derived from the VALUE instead,
+   * at the block we recorded when we wrote it.
+   *
+   * Two things this cannot do properly. `findTokenRects` matches text, so a value that also
+   * occurs as ordinary prose in the same paragraph gets a band it should not have. And a
+   * value written into two different blocks resolves only in the first, because the walker
+   * returns on its first hit. A real placeholder region would carry its own identity and
+   * neither would arise.
+   */
+  const resolveValueGroups = useCallback((state: PreviewState): Map<string, BandGroup> | null => {
+    const editor = editorRef.current;
+    const container = containerRef.current;
+    if (!editor || !container) return null;
+    const documentContext = getDocumentContext(editor);
+    const pageDivs = findPageDivs(container);
+    if (!documentContext || pageDivs.length === 0) return null;
+    const pageDivWidthPx = pageBoxWidthPx(pageDivs[0]);
+
+    const resolved = new Map<string, BandGroup>();
+    for (const entry of state.entries) {
+      const found = findTokenRects(
+        documentContext,
+        entry.blockRef.sectionIndex,
+        entry.blockRef.blockIndex,
+        entry.value,
+        pageDivWidthPx,
+        entry.blockRef.rowIndex ?? null,
+      );
+      if (!found || found.rects.length === 0) continue;
+      resolved.set(entry.key, {
+        key: entry.key,
+        // A distinct accent, so a filled value never reads as an unfilled placeholder.
+        accentHex: FILLED_ACCENT,
+        pageIndex: found.pageIndex,
+        rects: found.rects,
+      });
+    }
+    return resolved;
+  }, []);
+
   const refresh = useCallback(async () => {
     const api = apiRef.current;
     if (!api) return;
     const list = await api.all();
     setFields(list);
-    const resolved = resolveGroups(list, mintedKeysRef.current);
+    // While values are showing there are no markers to scan, so the bands come from our own
+    // record of the preview instead.
+    const livePreview = previewRef.current;
+    const resolved = livePreview ? resolveValueGroups(livePreview) : resolveGroups(list, mintedKeysRef.current);
     if (resolved) setGroups(resolved);
-  }, [resolveGroups]);
+  }, [resolveGroups, resolveValueGroups]);
 
   const scan = useCallback(async () => {
     setBusy(true);
@@ -389,6 +466,72 @@ export function App() {
     [selection, candidates, clearSelection, refresh],
   );
 
+  // ── fill and revert ──────────────────────────────────────────────────────────
+  const fillValues = useCallback(
+    async (values: ReadonlyMap<string, string>) => {
+      const doc = docRef.current;
+      if (!doc) return;
+      setBusy(true);
+      setLiveCapability("preview");
+      setPreviewRefusal(null);
+      setAudit(null);
+      try {
+        const outcome = await applyPreview(doc, values);
+        if (!outcome.ok) {
+          setPreviewRefusal(outcome.refusal);
+          return;
+        }
+        previewRef.current = outcome.state;
+        setPreview(outcome.state);
+        setFlash({
+          kind: "ok",
+          text: `Filled ${outcome.applied} placeholder${outcome.applied === 1 ? "" : "s"} — the document now holds real values.`,
+        });
+        await new Promise((resolve) => setTimeout(resolve, RELAYOUT_SETTLE_MS));
+        await refresh();
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refresh],
+  );
+
+  const revertValues = useCallback(async () => {
+    const doc = docRef.current;
+    if (!doc || !preview) return;
+    setBusy(true);
+    setLiveCapability("preview");
+    setPreviewRefusal(null);
+    setAudit(null);
+    try {
+      const outcome = await revertPreview(doc, preview);
+      if (!outcome.ok) {
+        // The document is now stuck holding values, which is the point being demonstrated.
+        setPreviewRefusal(outcome.refusal);
+        return;
+      }
+      previewRef.current = null;
+      setPreview(null);
+      setFlash({ kind: "ok", text: `Restored ${outcome.reverted} placeholder${outcome.reverted === 1 ? "" : "s"}.` });
+      await new Promise((resolve) => setTimeout(resolve, RELAYOUT_SETTLE_MS));
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }, [preview, refresh]);
+
+  const auditSave = useCallback(async () => {
+    const doc = docRef.current;
+    if (!doc || !preview) return;
+    setBusy(true);
+    setLiveCapability("preview");
+    try {
+      setAudit(await auditSavedDocument(doc, preview.entries));
+    } finally {
+      setBusy(false);
+    }
+  }, [preview]);
+
   // ── scroll to a field ────────────────────────────────────────────────────────
   const reveal = useCallback(
     (key: string) => {
@@ -446,7 +589,9 @@ export function App() {
             <header>
               <h2>Fields</h2>
               <span className="count">
-                {fields.length} found · {withGeometry} placed
+                {preview
+                  ? `${preview.entries.length} showing values`
+                  : `${fields.length} found · ${withGeometry} placed`}
               </span>
             </header>
             <div className="rail-scroll">
@@ -454,48 +599,76 @@ export function App() {
                 fields={fields}
                 groups={groups}
                 selectedKey={selectedKey}
+                emptyBecausePreviewing={preview !== null}
                 onHover={setHoveredKey}
                 onSelect={reveal}
               />
             </div>
           </section>
 
-          <section className="rail-section guard-section">
-            <header>
-              <h2>Protection</h2>
-              <span className="count">ask 01 &middot; 1</span>
-            </header>
-            <div className="rail-scroll">
-              <GuardPanel
-                enabled={guardOn}
-                onToggle={(next) => {
-                  setGuardOn(next);
-                  setDecisions([]);
-                }}
-                caret={caret}
-                decisions={decisions}
-              />
-            </div>
-          </section>
+          <nav className="rail-tabs" role="tablist">
+            {(
+              [
+                ["cost", "What that cost"],
+                ["protect", "Protection"],
+                ["fill", "Fill values"],
+                ["trace", `Reaches (${traceEntries.length})`],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={tab === id}
+                className={tab === id ? "on" : undefined}
+                onClick={() => setTab(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
 
-          <section className="rail-section lanes-section">
-            <header>
-              <h2>What that cost</h2>
-              <span className="count">ask 01 &amp; 02</span>
-            </header>
-            <div className="rail-scroll">
-              <ComparisonPanel trace={traceEntries} liveCapability={liveCapability} />
-            </div>
-          </section>
+          <section className="rail-section rail-panel">
+            {tab === "cost" && (
+              <div className="rail-scroll">
+                <ComparisonPanel trace={traceEntries} liveCapability={liveCapability} />
+              </div>
+            )}
 
-          <section className="rail-section trace-section">
-            <header>
-              <h2>Internal reaches, as they happened</h2>
-              <span className="count">{traceEntries.length}</span>
-            </header>
-            <div className="rail-scroll">
-              <TracePanel trace={traceEntries} />
-            </div>
+            {tab === "protect" && (
+              <div className="rail-scroll">
+                <GuardPanel
+                  enabled={guardOn}
+                  onToggle={(next) => {
+                    setGuardOn(next);
+                    setDecisions([]);
+                  }}
+                  caret={caret}
+                  decisions={decisions}
+                />
+              </div>
+            )}
+
+            {tab === "fill" && (
+              <div className="rail-scroll">
+                <PreviewPanel
+                  fields={fields}
+                  live={preview?.entries ?? null}
+                  busy={busy}
+                  audit={audit}
+                  refusal={previewRefusal}
+                  onApply={(values) => void fillValues(values)}
+                  onRevert={() => void revertValues()}
+                  onAudit={() => void auditSave()}
+                />
+              </div>
+            )}
+
+            {tab === "trace" && (
+              <div className="rail-scroll">
+                <TracePanel trace={traceEntries} />
+              </div>
+            )}
           </section>
         </aside>
       </div>
