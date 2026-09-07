@@ -22,13 +22,18 @@ bottom.
 The point is not that the feature is impossible. It ships. The point is what it costs, and
 which parts of it cannot be made correct at any price.
 
+**Try it without cloning anything:** <https://umaaz.github.io/nutrient-placeholder-example/>
+— then press **Scan for placeholders**.
+
+Or run it locally:
+
 ```bash
 pnpm install && pnpm dev
 ```
 
-Open the URL it prints, then press **Scan for placeholders**. Requires network: the SDK
-fetches its own assets from Nutrient's public CDN. A license key is optional —
-copy `.env.example` to `.env` if you want to supply one.
+Either way, press **Scan for placeholders** first. Requires network: the npm package is a
+~10KB loader and the implementation is fetched from Nutrient's public CDN at runtime. A license
+key is optional — the demo runs without one; copy `.env.example` to `.env` to supply one.
 
 ---
 
