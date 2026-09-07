@@ -43,7 +43,15 @@
 //  A `placeholder.protected = true` the editor itself honours has none of these problems:
 //  no DOM interception, no shadow caret, no IME hole, and no undecidable state.
 // ─────────────────────────────────────────────────────────────────────────────────────────
-import { type CaretState, acceptBackspace, acceptDelete, acceptInsertion, isUntrackable } from "@/internal/caretModel";
+import {
+  type CaretState,
+  acceptBackspace,
+  acceptDelete,
+  acceptInsertion,
+  isNavigationKey,
+  isUntrackable,
+  moveCaret,
+} from "@/internal/caretModel";
 import { trace } from "@/internal/trace";
 
 /** What the guard decided about one keystroke. */
@@ -61,7 +69,9 @@ export type GuardDecision = {
     | "allowed"
     /** The caret model was null, so nothing could be decided. This is the interesting one. */
     | "caret-unknown"
-    /** Not an edit key — navigation, a modifier chord, a function key. */
+    /** Navigation the model followed — the caret moved and protection held. */
+    | "navigated"
+    /** Not an edit key — a modifier chord, a function key, a bare Shift. */
     | "not-an-edit";
 };
 
@@ -132,12 +142,31 @@ export function installPlaceholderGuard({
   });
 
   const handler = (event: KeyboardEvent) => {
-    // Navigation and chords are not edits, but they DO move or invalidate the caret, so the
-    // model has to be dropped before the next decision is made against it.
+    // Keys that restructure the block, or any modifier chord: nothing to follow, so drop the
+    // model rather than let the next decision be made against a stale one.
     if (isUntrackable(event)) {
-      const caret = getCaret();
-      if (caret !== null) setCaret(null);
+      if (getCaret() !== null) setCaret(null);
       onDecision({ key: event.key, index: null, blocked: false, marker: null, reason: "not-an-edit" });
+      return;
+    }
+
+    // Navigation is FOLLOWED rather than surrendered to — see `moveCaret`. This is what keeps
+    // protection alive through an arrow key, and it is caret navigation reimplemented against
+    // the SDK's own layout data because the SDK reports none of it.
+    if (isNavigationKey(event.key)) {
+      const current = getCaret();
+      if (current === null) return;
+      const moved = moveCaret(current, event.key);
+      setCaret(moved);
+      onDecision({
+        key: event.key,
+        index: moved?.index ?? null,
+        blocked: false,
+        marker: null,
+        // Null means the caret left the block, or the geometry was stale — either way we no
+        // longer know where it is.
+        reason: moved === null ? "caret-unknown" : "navigated",
+      });
       return;
     }
 

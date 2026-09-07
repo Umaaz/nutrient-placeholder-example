@@ -48,7 +48,7 @@ key is optional — the demo runs without one; copy `.env.example` to `.env` to 
 | Hover a field row | Bands recede and emphasise — all inline styles, because the page shadow roots are closed | 01 · 4 |
 | Click a field row | Scroll-to-field, via a scroll container located by a CSS heuristic | 02 · D |
 | Type in the document | Every placeholder is re-scanned and re-placed from scratch, because the change event carries nothing | 02 · C |
-| Switch on **Protect placeholders**, click into a marker and type | The keystroke is refused and the marker survives — then press `←` first and watch it stop working | 01 · 1 |
+| Switch on **Protect placeholders**, click into a marker and type | The keystroke is refused and the marker survives; arrow keys keep the protection alive, but Enter voids it and the panel says so | 01 · 1 |
 | Switch to `multi-section-nda.docx` and mint past the section break | The write is **refused** — see [Known limitations](#known-limitations) | — |
 | The **Internal reaches** log | Each reach, what it touched, and why the public API could not answer | — |
 
@@ -127,8 +127,8 @@ getSelectionContent(): Content  // what is selected. Not where it is.
 So [`caretModel.ts`](src/internal/caretModel.ts) maintains a **shadow caret**: seeded by
 hit-testing a click against the internal layout tree, then advanced by every keystroke the
 guard allows through. It has to be synchronous — a `keydown` handler cannot await, and reading
-the document's text needs a transaction — so the block's text and its marker spans are
-snapshotted at seed time and maintained locally after that.
+the document's text needs a transaction — so the block's text, its marker spans and its
+per-character line positions are snapshotted at seed time and maintained locally after that.
 
 Two things make that work at all. Click hit-testing is exact: measured against ground truth
 (click where the model says index *i* is, type a sentinel, read the document back) it was 8/10
@@ -136,32 +136,56 @@ on a fixture built specifically to break it, and both failures were the tab/hard
 index-space bug that `buildCharAnchors` now fixes. And tracking holds: seeded once, ten
 consecutive keystrokes all landed where predicted.
 
+### Navigation has to be reimplemented too
+
+A guard that dies on the first arrow key protects nothing, because moving the caret is how you
+get to the text you want to edit. So `moveCaret` follows navigation rather than surrendering
+to it — which means reimplementing caret movement against the SDK's own layout data, since the
+SDK performs it internally and reports none of it:
+
+- **Left/Right** are ±1 in text space and need no geometry, so they survive an edit.
+- **Up/Down** move by *line*, which is a fact about layout, not text. They use the
+  per-character `lineIndex` and x positions from `buildCharAnchors` — find the caret's line and
+  x, then take the nearest x on the line above or below.
+- **Home/End** are the ends of the current line, so they need the same data.
+
+Verified live: seeding at the left edge of `{{ effective_date }}` and pressing `→` walks the
+caret 71 → 72 → 73 → 74, the panel keeps naming the marker it is inside, and typing stays
+refused the whole way.
+
 ### And then it stops being correct
 
 **IME composition leaks through every configuration in the table.** So a placeholder is not
 protected from a user typing Japanese, Chinese or Korean. For a legal-document product that is
 not a nicety.
 
-**The caret model goes null, and then nothing can be decided.** Anything that moves the caret
-by layout rather than by text — an arrow key, Home, End, Page Up/Down — would require
-reimplementing line-breaking to track. Enter and Tab restructure the block. A modifier chord
-could be any command at all. Every one of those voids the model, and a voided model leaves the
-guard two options, both wrong: refuse every keystroke in the document, or allow one that
-damages a marker.
+**The model still goes null, and then nothing can be decided.** Four ways, all of them
+ordinary:
 
-This demo takes the second and *shows you*, because that is the failure a real product would
-ship. Turn the guard on, click into a marker, press `←` once, then type: the caret readout
-reads `unknown`, the keystroke is allowed through unexamined, and the panel says so.
+- **Enter or Tab** restructure the block, so the snapshot no longer describes it.
+- **A modifier chord** could be any command at all.
+- **Leaving the block** — `←` off the front, `↑` from the first line — moves the caret into a
+  paragraph that was never snapshotted.
+- **Vertical movement after an edit.** Accepting a keystroke changes the text, so the line
+  positions describe a layout that no longer exists. Left/Right still work; `↑`, `↓`, Home and
+  End cannot, because re-deriving the layout needs a fresh snapshot and that is not available
+  synchronously inside a keydown handler.
+
+A voided model leaves the guard two options, both wrong: refuse every keystroke in the
+document, or allow one that damages a marker. This demo takes the second and *shows you*,
+because that is the failure a real product would ship. Turn the guard on, click into a marker,
+press Enter, then type — the decision log reads:
 
 ```
-caret         unknown
-inside        —
-refused       3
-undecidable   1
+ArrowRight  @74  caret followed
+x           @74  insertion inside the marker     ← refused
+ArrowRight  @75  caret followed
+Enter        —   not an edit                     ← model voided here
+x            —   caret unknown, allowed unexamined
 ```
 
-That `undecidable` count is the honest measure of this approach. Every one of those keystrokes
-was a placeholder that may already be broken, with nothing able to detect it.
+That last line is the honest measure of this whole approach, and the panel counts them. Each
+one is a placeholder that may already be broken, with nothing able to detect it.
 
 > So the ask does not change, but its justification does. It is not "this is impossible".
 > It is: the only available implementation depends on out-guessing the SDK about which DOM
@@ -365,8 +389,8 @@ src/
                            and N of them written in forced order       (02 · B, 01 · 2)
     bandPainter.ts         our own divs, inline styles only            (01 · 4)
     useTextSelection.ts    capture-phase, passive pointer interception (02 · A)
-    caretModel.ts          a shadow caret, because the real one is
-                           not readable                                (01 · 1)
+    caretModel.ts          a shadow caret and caret navigation, both
+                           reimplemented because neither is readable   (01 · 1)
     placeholderGuard.ts    keystroke refusal, and where it leaks       (01 · 1)
     trace.ts               the instrumentation behind the right panel
   proposed/
@@ -379,7 +403,7 @@ src/
 
 `src/internal/bandGeometry.ts`, `selectionGeometry.ts` and `snapshotLayout.ts` are ported from
 Wordsmith's production code with their unit tests
-(`pnpm test` — 99 tests), which run against a **real captured layout snapshot**
+(`pnpm test` — 109 tests), which run against a **real captured layout snapshot**
 in [`src/internal/__fixtures__`](src/internal/__fixtures__) — so the geometry is verifiable
 without a browser.
 

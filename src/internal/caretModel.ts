@@ -23,7 +23,7 @@
 // ─────────────────────────────────────────────────────────────────────────────────────────
 import type { DocAuthEditor } from "@nutrient-sdk/document-authoring";
 
-import { type BlockRef, buildCharAnchors } from "@/internal/bandGeometry";
+import { type BlockRef, type CharAnchor, buildCharAnchors } from "@/internal/bandGeometry";
 import { pointToCharIndex, resolveBlockAtPoint } from "@/internal/selectionGeometry";
 import { findPageDivs, getDocumentContext, pageBoxWidthPx } from "@/internal/snapshotLayout";
 import { trace } from "@/internal/trace";
@@ -47,6 +47,22 @@ export type CaretState = {
   markers: readonly MarkerRange[];
   /** Which page the seeding click landed on, for diagnostics. */
   pageIndex: number;
+  /**
+   * Per-character line and x positions from the seeding snapshot, which is what lets vertical
+   * caret movement be tracked at all — Up/Down move by LINE, and a line is a fact about
+   * layout, not about text.
+   */
+  anchors: readonly CharAnchor[];
+  /**
+   * True once an accepted edit has changed the text, because `anchors` then describes the
+   * layout of text that no longer exists.
+   *
+   * Horizontal movement survives this (Left/Right are ±1 in text space and need no geometry).
+   * Vertical movement does not, and re-deriving the anchors would need a fresh layout
+   * snapshot — which is only available after the SDK re-lays the page out, i.e. not
+   * synchronously inside a keydown handler.
+   */
+  geometryStale: boolean;
 };
 
 const MARKER_RE = /\{\{[^{}]*\}\}/g;
@@ -142,6 +158,8 @@ export function seedCaretFromClick(
     blockText: fullText,
     markers: markerRanges(fullText),
     pageIndex: hit.pageIndex,
+    anchors: charAnchors,
+    geometryStale: false,
   };
 }
 
@@ -171,6 +189,7 @@ export function acceptInsertion(caret: CaretState, char: string): CaretState {
     blockText: blockText.slice(0, index) + char + blockText.slice(index),
     index: index + 1,
     markers: shiftMarkers(caret.markers, index, char.length),
+    geometryStale: true,
   };
 }
 
@@ -183,6 +202,7 @@ export function acceptBackspace(caret: CaretState): CaretState {
     blockText: blockText.slice(0, index - 1) + blockText.slice(index),
     index: index - 1,
     markers: shiftMarkers(caret.markers, index, -1),
+    geometryStale: true,
   };
 }
 
@@ -194,32 +214,128 @@ export function acceptDelete(caret: CaretState): CaretState {
     ...caret,
     blockText: blockText.slice(0, index) + blockText.slice(index + 1),
     markers: shiftMarkers(caret.markers, index + 1, -1),
+    geometryStale: true,
   };
 }
 
+/** Keys this model tries to follow rather than give up on. */
+const NAVIGATION_KEYS = new Set([
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+  "Home",
+  "End",
+]);
+
+export function isNavigationKey(key: string): boolean {
+  return NAVIGATION_KEYS.has(key);
+}
+
+/** The line a caret index sits on, and its x — the two things vertical movement needs. */
+function lineAndXAt(caret: CaretState, index: number): { line: number; x: number } | null {
+  const { anchors } = caret;
+  if (anchors.length === 0) return null;
+  // A caret at index i sits before the character at i. At the very end of the block there is
+  // no character there, so take the last one's right edge instead.
+  if (index >= anchors.length) {
+    const last = anchors[anchors.length - 1];
+    return { line: last.lineIndex, x: last.xRight };
+  }
+  const at = anchors[Math.max(0, index)];
+  return { line: at.lineIndex, x: at.xLeft };
+}
+
+/** Caret indices that fall on `line`, as a [first, lastExclusive] pair. */
+function lineBounds(caret: CaretState, line: number): { first: number; last: number } | null {
+  const { anchors } = caret;
+  let first = -1;
+  let last = -1;
+  for (let i = 0; i < anchors.length; i++) {
+    if (anchors[i].lineIndex !== line) continue;
+    if (first < 0) first = i;
+    last = i;
+  }
+  if (first < 0) return null;
+  // `last + 1` is the caret position after the line's final character.
+  return { first, last: last + 1 };
+}
+
+/** The caret index on `line` nearest the x position `x`. */
+function indexNearestX(caret: CaretState, line: number, x: number): number | null {
+  const bounds = lineBounds(caret, line);
+  if (!bounds) return null;
+  let best = bounds.first;
+  let bestDistance = Infinity;
+  for (let i = bounds.first; i < bounds.last; i++) {
+    const distance = Math.abs(caret.anchors[i].xLeft - x);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = i;
+    }
+  }
+  // The position after the line's last character is a caret position too.
+  const tail = caret.anchors[bounds.last - 1];
+  if (tail && Math.abs(tail.xRight - x) < bestDistance) best = bounds.last;
+  return best;
+}
+
 /**
- * Keys after which we no longer know where the caret is.
+ * Follow a navigation key, or return null when the caret would leave what we can account for.
  *
- * Arrow keys and Home/End move it by an amount that depends on the LINE layout, not the text,
- * so tracking them would mean reimplementing line-breaking as well. Enter and Tab restructure
- * the block. Anything with a modifier could be any command at all.
+ * This is caret navigation, reimplemented. The SDK does it internally and reports nothing, so
+ * the only way to keep a shadow caret alive through an arrow key is to redo the work against
+ * the same layout data the band painter uses:
  *
- * Every one of these forces the model to null, and a null model is a guard that cannot decide.
- * This list is the honest size of the problem: it is not that the caret is hard to find once,
- * it is that it cannot be kept.
+ *   · Left/Right are ±1 in text space and need no geometry at all, so they survive an edit.
+ *   · Up/Down move by LINE, which is a fact about layout — they need `anchors`, and therefore
+ *     fail once an accepted edit has made those stale.
+ *   · Home/End are the ends of the current line, so they need `anchors` for the same reason.
+ *
+ * Null on: leaving the block at either end (the caret moves into a paragraph we have not
+ * snapshotted), and vertical or line-relative movement over stale geometry. Both are honest
+ * limits rather than guesses — see `placeholderGuard.ts` for what null costs.
+ */
+export function moveCaret(caret: CaretState, key: string): CaretState | null {
+  const { index, blockText } = caret;
+
+  if (key === "ArrowLeft") {
+    // Off the front of the block: the caret is now in the previous paragraph.
+    return index <= 0 ? null : { ...caret, index: index - 1 };
+  }
+  if (key === "ArrowRight") {
+    return index >= blockText.length ? null : { ...caret, index: index + 1 };
+  }
+
+  // Everything below needs the line structure.
+  if (caret.geometryStale) return null;
+  const here = lineAndXAt(caret, index);
+  if (!here) return null;
+
+  if (key === "Home" || key === "End") {
+    const bounds = lineBounds(caret, here.line);
+    if (!bounds) return null;
+    return { ...caret, index: key === "Home" ? bounds.first : bounds.last };
+  }
+
+  if (key === "ArrowUp" || key === "ArrowDown") {
+    const targetLine = here.line + (key === "ArrowUp" ? -1 : 1);
+    // Above the first line or below the last one, the caret leaves this block.
+    const moved = indexNearestX(caret, targetLine, here.x);
+    return moved === null ? null : { ...caret, index: moved };
+  }
+
+  return null;
+}
+
+/**
+ * Keys after which the model gives up outright.
+ *
+ * Navigation is handled by `moveCaret` above, so what is left here is the genuinely
+ * untrackable: keys that restructure the block, and modifier chords that could be any command
+ * at all. Every one of these voids the model, and a void model is a guard that cannot decide.
  */
 export function isUntrackable(event: KeyboardEvent): boolean {
   if (event.metaKey || event.ctrlKey || event.altKey) return true;
-  return [
-    "ArrowLeft",
-    "ArrowRight",
-    "ArrowUp",
-    "ArrowDown",
-    "Home",
-    "End",
-    "PageUp",
-    "PageDown",
-    "Enter",
-    "Tab",
-  ].includes(event.key);
+  return ["Enter", "Tab", "PageUp", "PageDown"].includes(event.key);
 }

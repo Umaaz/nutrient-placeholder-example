@@ -133,13 +133,26 @@ button { font: inherit; color: inherit; }
   background: var(--surface);
 }
 
-/* The three rail sections share the height rather than each taking a fixed slice: the field
-   list stays compact, the comparison lanes get the most room because they are the argument,
-   and the trace takes what is left. */
-.rail-section { display: flex; flex-direction: column; min-height: 0; }
-.rail-section.fields-section { flex: 0 1 auto; max-height: 30%; }
-.rail-section.lanes-section { flex: 1 1 58%; }
-.rail-section.trace-section { flex: 1 1 42%; }
+/* Four stacked sections sharing one column. The rules that matter:
+   · every section is `min-height: 0` so flex may actually shrink it — without this a tall
+     child sets an implicit floor and the section overflows its neighbour instead;
+   · every section's content sits in a `.rail-scroll`, so overflow scrolls rather than bleeding;
+   · the two content-sized sections (fields, protection) are capped as a share of the rail and
+     the two argument sections (lanes, trace) split whatever is left, so the budget cannot add
+     up to more than the column. */
+.rail-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Belt and braces: nothing escapes a section even if a child forgets to scroll. */
+  overflow: hidden;
+}
+.rail-section > header { flex: 0 0 auto; }
+
+.rail-section.fields-section { flex: 0 1 auto; max-height: 24%; }
+.rail-section.guard-section { flex: 0 1 auto; max-height: 34%; }
+.rail-section.lanes-section { flex: 1 1 0; min-height: 96px; }
+.rail-section.trace-section { flex: 1 1 0; min-height: 96px; }
 .rail-section > header {
   display: flex;
   align-items: baseline;
@@ -158,7 +171,7 @@ button { font: inherit; color: inherit; }
   color: var(--muted);
 }
 .rail-section > header .count { font-family: var(--f-mono); font-size: 11px; color: var(--ink-soft); }
-.rail-scroll { overflow-y: auto; min-height: 0; }
+.rail-scroll { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
 
 /* ── field list ────────────────────────────────────────────────────────────── */
 .fields { list-style: none; margin: 0; padding: 0; }
@@ -369,7 +382,7 @@ button { font: inherit; color: inherit; }
 .mint-note { margin: 0; font-size: 11px; line-height: 1.45; color: var(--muted); }
 
 /* ── keystroke guard ───────────────────────────────────────────────────────── */
-.guard { display: flex; flex-direction: column; gap: 8px; padding: 10px 14px; }
+.guard { display: flex; flex-direction: column; gap: 7px; padding: 9px 14px 11px; }
 
 .guard-toggle {
   display: flex;
@@ -384,7 +397,7 @@ button { font: inherit; color: inherit; }
 .guard-hint { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--muted); }
 .guard-hint code { font-family: var(--f-mono); font-size: 10.5px; }
 
-.guard-stats { display: flex; gap: 14px; margin: 2px 0 0; flex-wrap: wrap; }
+.guard-stats { display: flex; gap: 13px; margin: 1px 0 0; flex-wrap: wrap; }
 .guard-stats > div { display: flex; flex-direction: column; gap: 1px; }
 .guard-stats dt {
   font-family: var(--f-mono);
@@ -419,8 +432,8 @@ button { font: inherit; color: inherit; }
   display: flex;
   align-items: baseline;
   gap: 8px;
-  padding: 3px 8px;
-  font-size: 11px;
+  padding: 2px 8px;
+  font-size: 10.5px;
 }
 .guard-log li + li { border-top: 1px solid var(--rule); }
 .guard-log li.on { background: var(--blocked-wash); color: var(--blocked); }

@@ -19,6 +19,7 @@ const REASON_LABEL: Record<GuardDecision["reason"], string> = {
   "delete-into-marker": "delete would eat the marker",
   "insert-inside-marker": "insertion inside the marker",
   allowed: "allowed",
+  navigated: "caret followed",
   "caret-unknown": "caret unknown — allowed unexamined",
   "not-an-edit": "not an edit",
 };
@@ -37,14 +38,14 @@ export function GuardPanel({ enabled, onToggle, caret, decisions }: Props) {
 
       {!enabled ? (
         <p className="guard-hint">
-          Off. Click into <code>{"{{ effective_date }}"}</code> and type — the marker can be
-          half-deleted with no symptom, which is the state ask 01 · property 1 is about.
+          Off — a marker can be half-deleted with no symptom. That is the state ask 01 ·
+          property 1 is about.
         </p>
       ) : (
         <>
           <p className="guard-hint">
-            Click into the document to seed the caret, then type. Editing inside a marker is
-            refused; editing next to one is allowed.
+            Click into the document to seed the caret, then type. Inside a marker is refused;
+            next to one is allowed.
           </p>
 
           <dl className="guard-stats">
@@ -68,26 +69,27 @@ export function GuardPanel({ enabled, onToggle, caret, decisions }: Props) {
             </div>
           </dl>
 
-          {caret === null && (
+          {/* One warning, not two — they were saying the same thing twice in a 340px rail.
+              The live state takes precedence; otherwise report the tally. */}
+          {caret === null ? (
             <p className="guard-warn">
-              The caret model is null, so the guard cannot decide anything — every keystroke is
-              passing through unexamined. An arrow key, Home, Enter or a click outside a
-              paragraph does this. Click into a paragraph to re-seed it.
+              Caret unknown, so nothing can be decided — keystrokes are passing unexamined. An
+              arrow key, Home, Enter or a click outside a paragraph does this. Click a
+              paragraph to re-seed.
             </p>
-          )}
-
-          {blind.length > 0 && (
-            <p className="guard-warn">
-              {blind.length} keystroke{blind.length === 1 ? "" : "s"} allowed without being
-              checked. In a real product each of those is a placeholder that may already be
-              broken, with nothing to detect it.
-            </p>
+          ) : (
+            blind.length > 0 && (
+              <p className="guard-warn">
+                {blind.length} keystroke{blind.length === 1 ? "" : "s"} allowed unchecked — each
+                one a placeholder that may already be broken, with nothing to detect it.
+              </p>
+            )
           )}
 
           {decisions.length > 0 && (
             <ul className="guard-log">
               {decisions
-                .slice(-7)
+                .slice(-5)
                 .reverse()
                 .map((decision, position) => (
                   <li key={`${decisions.length - position}`} className={decision.blocked ? "on" : undefined}>

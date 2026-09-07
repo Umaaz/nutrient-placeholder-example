@@ -295,8 +295,10 @@ export function App() {
         setCaret(next);
       },
       onDecision: (decision) => {
-        // Navigation fires constantly; only keep what a reader would want to see.
-        if (decision.reason === "not-an-edit" && decision.index !== null) return;
+        // Bare modifiers and function keys fire constantly and say nothing.
+        if (decision.reason === "not-an-edit" && decision.key.length > 1 && decision.index === null) {
+          if (!["Enter", "Tab", "PageUp", "PageDown"].includes(decision.key)) return;
+        }
         setDecisions((previous) => [...previous, decision].slice(-40));
       },
     });
@@ -458,20 +460,22 @@ export function App() {
             </div>
           </section>
 
-          <section className="rail-section">
+          <section className="rail-section guard-section">
             <header>
               <h2>Protection</h2>
               <span className="count">ask 01 &middot; 1</span>
             </header>
-            <GuardPanel
-              enabled={guardOn}
-              onToggle={(next) => {
-                setGuardOn(next);
-                setDecisions([]);
-              }}
-              caret={caret}
-              decisions={decisions}
-            />
+            <div className="rail-scroll">
+              <GuardPanel
+                enabled={guardOn}
+                onToggle={(next) => {
+                  setGuardOn(next);
+                  setDecisions([]);
+                }}
+                caret={caret}
+                decisions={decisions}
+              />
+            </div>
           </section>
 
           <section className="rail-section lanes-section">

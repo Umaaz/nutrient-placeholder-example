@@ -175,7 +175,7 @@ export const manifest: readonly ManifestEntry[] = [
     status: "degraded",
     ask: "01 · 1",
     route:
-      "placeholderGuard + caretModel. A capture-phase keydown calling preventDefault AND stopImmediatePropagation does refuse typing, paste, backspace and undo — measured, and the only configuration that holds all four. But deciding needs a hand-maintained shadow caret, IME composition leaks through every interception point tested, and when the caret model goes null the guard can only refuse every edit or allow a damaging one.",
+      "placeholderGuard + caretModel. A capture-phase keydown calling preventDefault AND stopImmediatePropagation refuses typing, paste, backspace and undo — measured, and the only configuration that holds all four. But deciding needs a hand-maintained shadow caret AND a reimplementation of caret navigation, IME composition leaks through every interception point tested, and when the model voids the guard can only refuse every edit or allow a damaging one.",
   },
   {
     signature: "placeholder.setDisplayValue(text)",
@@ -498,7 +498,7 @@ export function placeholders(
       defends: ["typing", "paste", "backspace", "delete", "undo"],
       leaks: ["IME composition"],
       caveat:
-        "Requires a shadow caret maintained outside the SDK, because hasActiveCursor() is a bare boolean. Any arrow key, Home/End, Enter, Tab or modifier chord voids it, and a voided model can only refuse every edit in the document or allow one that damages a marker.",
+        "Requires a shadow caret maintained outside the SDK, because hasActiveCursor() is a bare boolean — including a reimplementation of caret navigation, so that an arrow key does not end the protection. It still voids on Enter, Tab, a modifier chord, leaving the block, or vertical movement after an edit; and a voided model can only refuse every edit in the document or allow one that damages a marker.",
     }),
   };
 }
