@@ -14,6 +14,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DocAuthDocument, DocAuthEditor } from "@nutrient-sdk/document-authoring";
 
 import { type BandGroup, MINTED_ACCENT, PLACEHOLDER_ACCENT, clearBands, paintBands } from "@/internal/bandPainter";
+import { type CaretState, seedCaretFromClick } from "@/internal/caretModel";
+import { type GuardDecision, installPlaceholderGuard } from "@/internal/placeholderGuard";
 import { markerFor } from "@/internal/scanMarkers";
 import { findPageDivs } from "@/internal/snapshotLayout";
 import { type Capability, type TraceEntry, resetTrace, subscribeToTrace, trace } from "@/internal/trace";
@@ -28,6 +30,7 @@ import {
 import { mountEditor } from "@/sdk/mountEditor";
 
 import { ComparisonPanel } from "@/app/ComparisonPanel";
+import { GuardPanel } from "@/app/GuardPanel";
 import { FieldList } from "@/app/FieldList";
 import { MintCard } from "@/app/MintCard";
 import { TracePanel } from "@/app/TracePanel";
@@ -75,6 +78,17 @@ export function App() {
   const [flash, setFlash] = useState<Flash>(null);
   /** Every occurrence of the phrase under the current selection, for the mint card's picker. */
   const [candidates, setCandidates] = useState<readonly PlaceholderCandidate[]>([]);
+
+  // ── the keystroke guard (ask 01 · property 1) ────────────────────────────────
+  const [guardOn, setGuardOn] = useState(false);
+  const [caret, setCaret] = useState<CaretState | null>(null);
+  const [decisions, setDecisions] = useState<readonly GuardDecision[]>([]);
+  // The guard's keydown handler runs synchronously and cannot read React state, so the caret
+  // lives in a ref and the state above only mirrors it for rendering.
+  const caretRef = useRef<CaretState | null>(null);
+  /** Mirrors `guardOn` for the namespace's `protected` getter, which is built at boot. */
+  const guardOnRef = useRef(false);
+  guardOnRef.current = guardOn;
 
   useEffect(() => subscribeToTrace((entries) => setTraceEntries([...entries])), []);
 
@@ -134,7 +148,7 @@ export function App() {
         if (cancelled) return;
         editorRef.current = mounted.editor;
         docRef.current = mounted.doc;
-        apiRef.current = placeholders(mounted.doc, mounted.editor, container);
+        apiRef.current = placeholders(mounted.doc, mounted.editor, container, () => guardOnRef.current);
         setBooted(true);
       } catch (error) {
         if (!cancelled) setFlash({ kind: "bad", text: `Could not load the document: ${String(error)}` });
@@ -249,6 +263,56 @@ export function App() {
     window.addEventListener("resize", repaint);
     return () => window.removeEventListener("resize", repaint);
   }, [booted, refresh]);
+
+  // ── seed the caret from a click ──────────────────────────────────────────────
+  // Capture phase and passive, like the selection listeners: the SDK has to keep receiving
+  // the click so it can place its own caret, which is the one that will actually be typed at.
+  // Ours is a parallel model of where we believe that caret is.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !booted || !guardOn) return;
+    const onPointerUp = (event: PointerEvent) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      const seeded = seedCaretFromClick(editor, container, event.clientX, event.clientY);
+      caretRef.current = seeded;
+      setCaret(seeded);
+    };
+    const options = { capture: true, passive: true } as const;
+    container.addEventListener("pointerup", onPointerUp, options);
+    return () => container.removeEventListener("pointerup", onPointerUp, options);
+  }, [booted, guardOn]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !booted || !guardOn) return;
+    setLiveCapability("guard");
+    const uninstall = installPlaceholderGuard({
+      container,
+      getCaret: () => caretRef.current,
+      setCaret: (next) => {
+        caretRef.current = next;
+        setCaret(next);
+      },
+      onDecision: (decision) => {
+        // Navigation fires constantly; only keep what a reader would want to see.
+        if (decision.reason === "not-an-edit" && decision.index !== null) return;
+        setDecisions((previous) => [...previous, decision].slice(-40));
+      },
+    });
+    return () => {
+      uninstall();
+      caretRef.current = null;
+      setCaret(null);
+    };
+  }, [booted, guardOn]);
+
+  // A write from our own code changes the text under the shadow caret, so drop it rather
+  // than let the guard decide against a stale snapshot.
+  useEffect(() => {
+    caretRef.current = null;
+    setCaret(null);
+  }, [fields]);
 
   // ── occurrences of the current selection ────────────────────────────────────
   // Looked up as soon as a selection exists, so the mint card can offer a choice between
@@ -392,6 +456,22 @@ export function App() {
                 onSelect={reveal}
               />
             </div>
+          </section>
+
+          <section className="rail-section">
+            <header>
+              <h2>Protection</h2>
+              <span className="count">ask 01 &middot; 1</span>
+            </header>
+            <GuardPanel
+              enabled={guardOn}
+              onToggle={(next) => {
+                setGuardOn(next);
+                setDecisions([]);
+              }}
+              caret={caret}
+              decisions={decisions}
+            />
           </section>
 
           <section className="rail-section lanes-section">

@@ -9,17 +9,22 @@
 //  the same work and produce the same result. The `manifest` below records, per member, how
 //  many distinct reaches past the public API that delegation costs.
 //
-//  Two of the five properties in ask 01 have no internal route at all. They are declared
-//  here and throw `UnreachableError`, because that is the honest shape of the request: they
-//  cannot be worked around, only added.
+//  One of the five properties in ask 01 has no internal route at all. It is declared here and
+//  throws `UnreachableError`, because that is the honest shape of the request:
 //
-//    · `protected`        — DocAuthEditorMode is document-WIDE. There is no way to refuse a
-//                           keystroke inside one range of an otherwise editable document.
-//                           (Ask 01 · property 1 — "the one that matters most".)
 //    · `setDisplayValue`  — Rendering a value in place while the stored DOCX keeps the
 //                           placeholder needs a distinction between displayed and stored
 //                           content that the model does not have.
 //                           (Ask 01 · property 5.)
+//
+//  Protection — property 1, "the one that matters most" — turned out NOT to be unreachable,
+//  and this repo implements it. See `src/internal/placeholderGuard.ts`. A capture-phase
+//  `keydown` listener calling both `preventDefault()` and `stopImmediatePropagation()` does
+//  refuse the keystroke, and a hand-maintained shadow caret decides when to. It works. What it
+//  cannot do is stay correct: IME composition leaks through every interception point measured,
+//  and the moment the shadow caret goes null the guard can only refuse every edit in the
+//  document or allow one that damages a marker. So it is declared `degraded`, not
+//  `unreachable`, and `protect()` below returns the honest caveats rather than throwing.
 //
 //  A third is partly reachable and shown as such:
 //
@@ -167,10 +172,10 @@ export const manifest: readonly ManifestEntry[] = [
   {
     signature: "placeholder.protected = true",
     purpose: "The editor itself refuses a keystroke inside the region, or replaces the whole region.",
-    status: "unreachable",
+    status: "degraded",
     ask: "01 · 1",
     route:
-      "DocAuthEditorMode is document-wide. Nothing scopes editability to a range, and no keystroke is cancellable — the marker can be half-deleted with no symptom.",
+      "placeholderGuard + caretModel. A capture-phase keydown calling preventDefault AND stopImmediatePropagation does refuse typing, paste, backspace and undo — measured, and the only configuration that holds all four. But deciding needs a hand-maintained shadow caret, IME composition leaks through every interception point tested, and when the caret model goes null the guard can only refuse every edit or allow a damaging one.",
   },
   {
     signature: "placeholder.setDisplayValue(text)",
@@ -203,8 +208,14 @@ export type Placeholder = {
   readonly occurrences: number;
   /** Ask 02 · A. Shimmed. */
   rects(): PlaceholderRectsResult;
-  /** Ask 01 · 1. Always false, and not settable. */
-  readonly protected: false;
+  /**
+   * Ask 01 · 1. Whether the demo's keystroke guard is currently defending this placeholder.
+   *
+   * Not a property of the document — nothing in the model records it. It reflects whether
+   * `installPlaceholderGuard` is running, and even when true the protection is only as good
+   * as the shadow caret behind it.
+   */
+  readonly protected: boolean;
   /** Ask 01 · 5. Throws `UnreachableError`. */
   setDisplayValue(value: string | null): Promise<never>;
 };
@@ -327,7 +338,13 @@ export function selectOccurrences(
  * and scrolling both go through the rendered DOM. In the proposed API they would hang off the
  * document like `comments` does, and the SDK would resolve that itself.
  */
-export function placeholders(doc: DocAuthDocument, editor: DocAuthEditor, container: HTMLElement) {
+export function placeholders(
+  doc: DocAuthDocument,
+  editor: DocAuthEditor,
+  container: HTMLElement,
+  /** Whether the keystroke guard is currently installed. See `protected` on a Placeholder. */
+  guardActive: () => boolean = () => false,
+) {
   const build = (field: Awaited<ReturnType<typeof scanMarkers>>[number]): Placeholder => ({
     key: field.key,
     marker: field.marker,
@@ -358,7 +375,7 @@ export function placeholders(doc: DocAuthDocument, editor: DocAuthEditor, contai
       return null;
     },
 
-    protected: false,
+    protected: guardActive(),
 
     setDisplayValue: () =>
       Promise.reject(
@@ -464,15 +481,25 @@ export function placeholders(doc: DocAuthDocument, editor: DocAuthEditor, contai
       return true;
     },
 
-    /** Ask 01 · 1. Declared so the shape is complete; never satisfiable. */
-    protect: (): Promise<never> =>
-      Promise.reject(
-        new UnreachableError(
-          "protect",
-          "01 · 1",
-          "DocAuthEditorMode is document-wide and no keystroke is cancellable, so one range of an editable document cannot be defended",
-        ),
-      ),
+    /**
+     * Ask 01 · 1. Reports what the demo's guard can and cannot defend.
+     *
+     * Not a `Promise<never>` any more: protection turned out to be partly buildable, and
+     * pretending otherwise would misstate the ask. Turning it on is `installPlaceholderGuard`;
+     * this reports the terms it comes with.
+     */
+    protect: (): {
+      supported: boolean;
+      defends: readonly string[];
+      leaks: readonly string[];
+      caveat: string;
+    } => ({
+      supported: true,
+      defends: ["typing", "paste", "backspace", "delete", "undo"],
+      leaks: ["IME composition"],
+      caveat:
+        "Requires a shadow caret maintained outside the SDK, because hasActiveCursor() is a bare boolean. Any arrow key, Home/End, Enter, Tab or modifier chord voids it, and a voided model can only refuse every edit in the document or allow one that damages a marker.",
+    }),
   };
 }
 

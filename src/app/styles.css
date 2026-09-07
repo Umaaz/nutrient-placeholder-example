@@ -367,3 +367,73 @@ button { font: inherit; color: inherit; }
 .mint-ctx mark { background: var(--accent-wash); color: var(--accent-ink); padding: 0 1px; }
 
 .mint-note { margin: 0; font-size: 11px; line-height: 1.45; color: var(--muted); }
+
+/* ── keystroke guard ───────────────────────────────────────────────────────── */
+.guard { display: flex; flex-direction: column; gap: 8px; padding: 10px 14px; }
+
+.guard-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--f-mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+.guard-toggle input { margin: 0; }
+
+.guard-hint { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--muted); }
+.guard-hint code { font-family: var(--f-mono); font-size: 10.5px; }
+
+.guard-stats { display: flex; gap: 14px; margin: 2px 0 0; flex-wrap: wrap; }
+.guard-stats > div { display: flex; flex-direction: column; gap: 1px; }
+.guard-stats dt {
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.guard-stats dd { margin: 0; font-family: var(--f-mono); font-size: 11.5px; color: var(--ink); }
+.guard-stats dd.unknown { color: var(--blocked); }
+
+.guard-warn {
+  margin: 0;
+  padding: 7px 9px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--blocked);
+  background: var(--blocked-wash);
+  border: 1px solid var(--blocked);
+  border-radius: 3px;
+}
+
+.guard-log {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--surface-sunk);
+}
+.guard-log li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 8px;
+  font-size: 11px;
+}
+.guard-log li + li { border-top: 1px solid var(--rule); }
+.guard-log li.on { background: var(--blocked-wash); color: var(--blocked); }
+.guard-key {
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  min-width: 46px;
+  padding: 0 4px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+  background: var(--surface);
+  text-align: center;
+}
+.guard-log li.on .guard-key { border-color: var(--blocked); }
+.guard-at { font-family: var(--f-mono); font-size: 10px; color: var(--muted); min-width: 34px; }
+.guard-why { color: inherit; opacity: 0.85; }

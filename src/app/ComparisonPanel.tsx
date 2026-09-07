@@ -14,6 +14,7 @@ const CAPABILITY_FOR_SIGNATURE: Record<string, Capability> = {
   "doc.placeholders.findCandidates(selection)": "occurrences",
   'add({ key, occurrences: "all" | { ordinals: [0, 2] } | { limit: n } })': "mint",
   "placeholder.anchors  // TextAnchorRange[]": "occurrences",
+  "placeholder.protected = true": "guard",
   "placeholder.rects()": "paint",
   "placeholder.style = { background, border }": "paint",
   'doc.placeholders.on("click", handler)': "paint",

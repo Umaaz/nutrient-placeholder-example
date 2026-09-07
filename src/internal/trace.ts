@@ -14,6 +14,8 @@ export type Capability =
   | "scan"
   | "paint"
   | "select"
+  | "caret"
+  | "guard"
   | "occurrences"
   | "mint"
   | "sync"

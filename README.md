@@ -48,6 +48,7 @@ key is optional — the demo runs without one; copy `.env.example` to `.env` to 
 | Hover a field row | Bands recede and emphasise — all inline styles, because the page shadow roots are closed | 01 · 4 |
 | Click a field row | Scroll-to-field, via a scroll container located by a CSS heuristic | 02 · D |
 | Type in the document | Every placeholder is re-scanned and re-placed from scratch, because the change event carries nothing | 02 · C |
+| Switch on **Protect placeholders**, click into a marker and type | The keystroke is refused and the marker survives — then press `←` first and watch it stop working | 01 · 1 |
 | Switch to `multi-section-nda.docx` and mint past the section break | The write is **refused** — see [Known limitations](#known-limitations) | — |
 | The **Internal reaches** log | Each reach, what it touched, and why the public API could not answer | — |
 
@@ -60,21 +61,112 @@ actually did.
 
 ## The five things ask 01 wants, and where each one stands
 
-Ask 01 asks for a protected, keyed text range. Of its five properties, three can be faked and
-two cannot be reached at all.
+Ask 01 asks for a protected, keyed text range. Of its five properties, two can be worked
+around, one is only *partly* reachable, and two cannot be reached at all.
 
 | Property | Status here | Why |
 | --- | --- | --- |
-| **1. The user cannot partially edit it** | **Unreachable** | `DocAuthEditorMode` is document-wide. Nothing scopes editability to a range and no keystroke is cancellable, so a marker can be half-deleted, split or reworded with no symptom. This is the one the case calls "the one that matters most", and it is the one nothing in this repo can imitate. |
+| **1. The user cannot partially edit it** | Partly, and unsafely | It *is* buildable from outside the SDK — this repo does it, and you can switch it on. But it needs a shadow caret maintained by hand, it leaks IME, and it has an undecidable state. See [Protecting a placeholder](#protecting-a-placeholder). |
 | **2. Carries a key, and can be enumerated** | Worked around | [`scanMarkers.ts`](src/internal/scanMarkers.ts) — a read-only transaction, a walk of every block, a regex over its plain text. |
 | **2a. One key over several positions** | Partly, and unsafely | See [One key, several occurrences](#one-key-several-occurrences). The writes work; the *addressing* does not survive an edit. |
 | **3. Survives a DOCX round trip** | **Unreachable** | `w:sdt` content controls are neither readable nor writable through the public API. A placeholder survives a round trip only as the literal text it already is: unprotected, and indistinguishable from prose the user typed. |
 | **4. Styled in the browser, and reports clicks** | Worked around | [`bandPainter.ts`](src/internal/bandPainter.ts) — our own divs, inline styles only, our own click listener mapped back to a key. It does at least keep the styling out of the exported document for free, since these divs were never part of it. |
 | **5. Can display a value without committing it** | **Unreachable** | The model has no distinction between displayed and stored content, so any value written is the value saved. |
 
-`placeholders.protect()` and `placeholder.setDisplayValue()` exist in this repo's proposed
-namespace and reject with an `UnreachableError` that names the ask. That is deliberate: it is
-the honest shape of the request. Those two can only be added, not worked around.
+`placeholder.setDisplayValue()` exists in this repo's proposed namespace and rejects with an
+`UnreachableError` naming the ask. That is deliberate: it is the honest shape of the request.
+Properties 3 and 5 can only be added, not worked around.
+
+`placeholders.protect()` does **not** throw, because protection turned out to be partly
+buildable — see below. An earlier version of this README said no keystroke was cancellable.
+That was wrong, and it understated the ask by describing it as impossible rather than as
+unsafe.
+
+---
+
+## Protecting a placeholder
+
+Property 1 is the one the case calls "the one that matters most", and it is the only one of the
+five where this repo's answer changed after we measured properly. It is not unreachable. Switch
+on **Protect placeholders from editing** in the app, click into `{{ effective_date }}` and type:
+the keystroke is refused and the marker stays whole.
+
+Here is what makes it work, and then what makes it not good enough.
+
+### Which listener actually stops a character
+
+There is no documented interception point, so every edit path was tried against SDK 1.19.1 in
+a headless browser, one at a time. `pd` is `preventDefault()`, `sip` is
+`stopImmediatePropagation()`, both on a capture-phase listener on the editor's container:
+
+| guard | type | paste | IME | backspace | undo |
+| --- | --- | --- | --- | --- | --- |
+| *(none)* | leak | leak | leak | leak | leak |
+| `keydown` + pd | **BLOCK** | **BLOCK** | leak | leak | leak |
+| `keydown` + sip | leak | leak | leak | **BLOCK** | **BLOCK** |
+| `beforeinput` + pd | **BLOCK** | leak | leak | leak | leak |
+| `beforeinput` + sip | leak | leak | leak | leak | leak |
+| `input` + sip | **BLOCK** | leak | leak | leak | leak |
+| `keydown` + pd + `beforeinput` + pd | **BLOCK** | **BLOCK** | leak | leak | — |
+| **`keydown` + pd + sip** | **BLOCK** | **BLOCK** | leak | **BLOCK** | **BLOCK** |
+
+Only the last row holds typing, paste, backspace and undo together, and that is what
+[`placeholderGuard.ts`](src/internal/placeholderGuard.ts) installs. Note what this table is: an
+empirical result about which DOM event the SDK happens to read. An implementation change moves
+it, silently, and the symptom is a placeholder that quietly stops being protected.
+
+### It needs a caret the SDK will not give us
+
+To refuse a keystroke you must know where the caret is. The entire public surface is:
+
+```ts
+hasActiveCursor(): boolean      // yes or no. Not where.
+getSelectionContent(): Content  // what is selected. Not where it is.
+```
+
+So [`caretModel.ts`](src/internal/caretModel.ts) maintains a **shadow caret**: seeded by
+hit-testing a click against the internal layout tree, then advanced by every keystroke the
+guard allows through. It has to be synchronous — a `keydown` handler cannot await, and reading
+the document's text needs a transaction — so the block's text and its marker spans are
+snapshotted at seed time and maintained locally after that.
+
+Two things make that work at all. Click hit-testing is exact: measured against ground truth
+(click where the model says index *i* is, type a sentinel, read the document back) it was 8/10
+on a fixture built specifically to break it, and both failures were the tab/hard-break
+index-space bug that `buildCharAnchors` now fixes. And tracking holds: seeded once, ten
+consecutive keystrokes all landed where predicted.
+
+### And then it stops being correct
+
+**IME composition leaks through every configuration in the table.** So a placeholder is not
+protected from a user typing Japanese, Chinese or Korean. For a legal-document product that is
+not a nicety.
+
+**The caret model goes null, and then nothing can be decided.** Anything that moves the caret
+by layout rather than by text — an arrow key, Home, End, Page Up/Down — would require
+reimplementing line-breaking to track. Enter and Tab restructure the block. A modifier chord
+could be any command at all. Every one of those voids the model, and a voided model leaves the
+guard two options, both wrong: refuse every keystroke in the document, or allow one that
+damages a marker.
+
+This demo takes the second and *shows you*, because that is the failure a real product would
+ship. Turn the guard on, click into a marker, press `←` once, then type: the caret readout
+reads `unknown`, the keystroke is allowed through unexamined, and the panel says so.
+
+```
+caret         unknown
+inside        —
+refused       3
+undecidable   1
+```
+
+That `undecidable` count is the honest measure of this approach. Every one of those keystrokes
+was a placeholder that may already be broken, with nothing able to detect it.
+
+> So the ask does not change, but its justification does. It is not "this is impossible".
+> It is: the only available implementation depends on out-guessing the SDK about which DOM
+> event it reads, and on a caret model that cannot be kept correct — and when it fails, it
+> fails silently, in a document whose whole value is that it is exact.
 
 ---
 
@@ -273,6 +365,9 @@ src/
                            and N of them written in forced order       (02 · B, 01 · 2)
     bandPainter.ts         our own divs, inline styles only            (01 · 4)
     useTextSelection.ts    capture-phase, passive pointer interception (02 · A)
+    caretModel.ts          a shadow caret, because the real one is
+                           not readable                                (01 · 1)
+    placeholderGuard.ts    keystroke refusal, and where it leaks       (01 · 1)
     trace.ts               the instrumentation behind the right panel
   proposed/
     placeholders.ts        the API we wanted, and what each member costs.
@@ -284,7 +379,7 @@ src/
 
 `src/internal/bandGeometry.ts`, `selectionGeometry.ts` and `snapshotLayout.ts` are ported from
 Wordsmith's production code with their unit tests
-(`pnpm test` — 75 tests), which run against a **real captured layout snapshot**
+(`pnpm test` — 99 tests), which run against a **real captured layout snapshot**
 in [`src/internal/__fixtures__`](src/internal/__fixtures__) — so the geometry is verifiable
 without a browser.
 
