@@ -1,0 +1,65 @@
+# Builds the demo and publishes it to GitHub Pages.
+#
+# The app is a static client-side SPA — no server, no API — so the whole deployment is
+# "build it and upload the dist". Two details worth knowing:
+#
+#  · BASE_PATH is derived from the repository name, because Pages serves a project site from
+#    /<repo>/ and every asset URL has to carry that prefix. Deriving it rather than hardcoding
+#    it means a fork or a rename keeps working.
+#  · The Nutrient SDK pulls its implementation and WASM from Nutrient's public CDN at runtime,
+#    so the published page needs network access but nothing is vendored here.
+name: Deploy to Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a newer push supersedes an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Gate the deploy on the checks, so a broken demo never reaches the URL we put in the
+      # support case.
+      - run: pnpm typecheck
+      - run: pnpm test
+
+      - run: pnpm build
+        env:
+          BASE_PATH: /${{ github.event.repository.name }}/
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

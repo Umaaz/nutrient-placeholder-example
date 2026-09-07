@@ -33,11 +33,15 @@ import { MintCard } from "@/app/MintCard";
 import { TracePanel } from "@/app/TracePanel";
 import "@/app/styles.css";
 
+// Relative to Vite's `base`, so the same build works from the root in dev and from a
+// /<repo>/ sub-path on GitHub Pages. `BASE_URL` always carries its trailing slash.
+const fixture = (name: string) => `${import.meta.env.BASE_URL}fixtures/${name}`;
+
 const FIXTURES = [
-  { url: "/fixtures/acme_nda_blueprint.docx", label: "acme_nda_blueprint.docx — 9 fields already marked up" },
-  { url: "/fixtures/acme_nda.docx", label: "acme_nda.docx — plain; mint fields into it yourself" },
+  { url: fixture("acme_nda_blueprint.docx"), label: "acme_nda_blueprint.docx — 9 fields already marked up" },
+  { url: fixture("acme_nda.docx"), label: "acme_nda.docx — plain; mint fields into it yourself" },
   {
-    url: "/fixtures/multi-section-nda.docx",
+    url: fixture("multi-section-nda.docx"),
     label: "multi-section-nda.docx — minting past a section break is REFUSED",
   },
 ] as const;

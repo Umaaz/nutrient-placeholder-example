@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "description": "A worked example of document placeholders on the Nutrient Document Authoring SDK, showing the internal APIs it currently requires beside the public API it should have used.",
+  "packageManager": "pnpm@11.18.0",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
